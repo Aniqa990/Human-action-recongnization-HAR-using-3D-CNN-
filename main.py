@@ -11,6 +11,7 @@ import torch.multiprocessing as mp
 import torch.distributed as dist
 from torch.backends import cudnn
 import torchvision
+import torch.nn as nn
 
 from opts import parse_opts
 from model import (generate_model, load_pretrained_model, make_data_parallel,
@@ -353,7 +354,8 @@ def main_worker(index, opt):
     if opt.is_master_node:
         print(model)
 
-    criterion = CrossEntropyLoss().to(opt.device)
+    weights = torch.tensor([1.61, 0.53, 1.53, 1.03, 1.17]).to(opt.device)
+    criterion = nn.CrossEntropyLoss(weight=weights)
 
     if not opt.no_train:
         (train_loader, train_sampler, train_logger, train_batch_logger,

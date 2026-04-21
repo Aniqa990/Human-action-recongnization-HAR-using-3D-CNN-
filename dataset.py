@@ -105,12 +105,15 @@ class VideoDataset(data.Dataset):
         clip = []
         for i in frame_indices:
             img_path = path / f'image_{i:05d}.jpg'
-            if not img_path.exists():
-                existing = sorted(path.glob('image_*.jpg'))
-                if not existing:
-                    raise FileNotFoundError(f'No frames in {path}')
-                img_path = existing[min(i, len(existing)) - 1]
-            img = Image.open(img_path).convert('RGB')
+            try:
+                if not img_path.exists():
+                    existing = sorted(path.glob('image_*.jpg'))
+                    if not existing:
+                        raise FileNotFoundError(f'No frames in {path}')
+                    img_path = existing[min(i, len(existing)) - 1]
+                img = Image.open(img_path).convert('RGB')
+            except Exception:
+                img = Image.new('RGB', (112, 112), (0, 0, 0))
 
             if self.spatial_transform is not None:
                 img = self.spatial_transform(img)

@@ -272,13 +272,13 @@ def main():
     parser.add_argument(
         "--input_dir",
         type=str,
-        default=r"G:/My Drive/DATASET",
+        default=r"G:\My Drive\Segmented_FYP_DATA",
         help="Path to your dataset root (contains class subfolders)"
     )
     parser.add_argument(
         "--output_dir",
         type=str,
-        default=r"G:/My Drive/DATASET_jpg",
+        default=r"G:\My Drive\Segmented_FYP_DATA_jpg",
         help="Where to save extracted JPG frames"
     )
     parser.add_argument(
