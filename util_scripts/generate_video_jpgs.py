@@ -117,6 +117,7 @@
 import subprocess
 import argparse
 import sys
+import shutil
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -130,6 +131,29 @@ VIDEO_MAGIC_BYTES = [
     b'\x1aE\xdf\xa3',         # mkv/webm
     b'RIFF',                   # avi
 ]
+
+
+def resolve_ffmpeg(ffmpeg_path: str = None) -> str:
+    if ffmpeg_path:
+        candidate = Path(ffmpeg_path)
+        if candidate.exists():
+            return str(candidate)
+
+    from_path = shutil.which('ffmpeg')
+    if from_path:
+        return from_path
+
+    winget_links = Path.home() / 'AppData' / 'Local' / 'Microsoft' / 'WinGet' / 'Links' / 'ffmpeg.exe'
+    if winget_links.exists():
+        return str(winget_links)
+
+    pkg_root = Path.home() / 'AppData' / 'Local' / 'Microsoft' / 'WinGet' / 'Packages'
+    if pkg_root.exists():
+        ffmpeg_bins = sorted(pkg_root.glob('Gyan.FFmpeg_*/*/bin/ffmpeg.exe'))
+        if ffmpeg_bins:
+            return str(ffmpeg_bins[-1])
+
+    return ''
 
 
 def is_video_file(path: Path) -> bool:
@@ -152,7 +176,7 @@ def is_video_file(path: Path) -> bool:
     return False
 
 
-def video_to_jpg(video_file_path, dst_dir_path):
+def video_to_jpg(video_file_path, dst_dir_path, ffmpeg_exe):
     """Convert a single video file to JPG frames using ffmpeg."""
     dst_dir_path.mkdir(parents=True, exist_ok=True)
 
@@ -163,7 +187,7 @@ def video_to_jpg(video_file_path, dst_dir_path):
         return True
 
     cmd = [
-        "ffmpeg",
+        ffmpeg_exe,
         "-i", str(video_file_path),
         "-vf", "scale=171:128",        # resize to standard input size
         "-q:v", "1",                   # best quality jpg
@@ -185,11 +209,11 @@ def video_to_jpg(video_file_path, dst_dir_path):
         print(f"  [done] {video_file_path.name} → {frame_count} frames")
         return True
     except FileNotFoundError:
-        print("[FATAL] ffmpeg not found. Install it with: conda install -c conda-forge ffmpeg")
-        sys.exit(1)
+        print(f"  [FATAL] ffmpeg executable not found: {ffmpeg_exe}")
+        return False
 
 
-def convert_dataset(input_dir: Path, output_dir: Path, n_workers: int = 4):
+def convert_dataset(input_dir: Path, output_dir: Path, ffmpeg_exe: str, n_workers: int = 4):
     """
     Walk FYPDATASET structure:
         input_dir/
@@ -249,7 +273,7 @@ def convert_dataset(input_dir: Path, output_dir: Path, n_workers: int = 4):
 
     # Use threads — safe on Windows (no multiprocessing issues)
     with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        futures = {executor.submit(video_to_jpg, v, d): v for v, d in jobs}
+        futures = {executor.submit(video_to_jpg, v, d, ffmpeg_exe): v for v, d in jobs}
         for future in as_completed(futures):
             ok = future.result()
             if ok:
@@ -287,6 +311,12 @@ def main():
         default=4,
         help="Number of parallel workers (default: 4)"
     )
+    parser.add_argument(
+        "--ffmpeg_path",
+        type=str,
+        default="",
+        help="Optional absolute path to ffmpeg executable"
+    )
     args = parser.parse_args()
 
     input_dir  = Path(args.input_dir)
@@ -297,11 +327,18 @@ def main():
         print("Make sure Google Drive for Desktop is running and the path is correct.")
         sys.exit(1)
 
+    ffmpeg_exe = resolve_ffmpeg(args.ffmpeg_path)
+    if not ffmpeg_exe:
+        print("[ERROR] Could not locate ffmpeg executable.")
+        print("Use --ffmpeg_path or add ffmpeg to PATH.")
+        sys.exit(1)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"Input  : {input_dir}")
     print(f"Output : {output_dir}")
+    print(f"ffmpeg : {ffmpeg_exe}")
 
-    convert_dataset(input_dir, output_dir, n_workers=args.n_workers)
+    convert_dataset(input_dir, output_dir, ffmpeg_exe=ffmpeg_exe, n_workers=args.n_workers)
 
 
 if __name__ == "__main__":
