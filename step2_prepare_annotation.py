@@ -43,7 +43,7 @@ parser.add_argument('--test_split', type=float, default=0.15,
 parser.add_argument('--seed',       type=int, default=42)
 args = parser.parse_args()
 
-CLASSES = ['fight', 'Normal', 'unsafeClimb', 'unsafeJump', 'unsafeThrow']
+CLASSES = ['fight', 'Normal', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall']
 random.seed(args.seed)
 
 database = {}

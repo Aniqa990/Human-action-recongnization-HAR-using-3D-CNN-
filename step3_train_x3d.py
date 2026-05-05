@@ -1,24 +1,36 @@
 """
-step3_train_mobilenet.py
-Trains MobileNet3D on FYP child safety dataset.
+step3_train_x3d.py
+Trains X3D-S on FYP child safety dataset.
 
-WHY MOBILENET3D:
-  - Very fast: ~5-10 mins per epoch
-  - Lightweight: works well on small datasets (~2800 videos)
-  - Depthwise separable 3D convolutions = efficient
-  - Still captures spatiotemporal features for action recognition
+WHY X3D FOR YOUR PROBLEM:
+  - X3D progressively expands only dimensions that matter:
+      * Temporal depth    → captures full action arc
+      * Frame rate        → captures motion speed
+      * Spatial resolution → captures scene context (height, objects)
+      * Network width     → captures feature richness
+  - Much faster than SlowFast (~10-15 mins/epoch)
+  - Better accuracy than MobileNet3D
+  - Pretrained on Kinetics-400
+  - Single stream → no dual-pathway complexity
+
+COMPARISON:
+  SlowFast : best accuracy, very slow (3hrs/epoch)  ❌
+  X3D-S    : great accuracy, fast (10-15min/epoch)  ✅ ← this script
+  MobileNet: good accuracy, fastest (5-10min/epoch) ✅
 
 Usage:
-    python step3_train_mobilenet.py \
+    pip install pytorchvideo
+
+    python step3_train_x3d.py \
         --jpg_root    "G:/My Drive/FYP_DATA_jpg_raw" \
         --annotation  "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" \
-        --result_path "G:/My Drive/FYP_DATA_jpg_raw/results_mobilenet" \
+        --result_path "G:/My Drive/FYP_DATA_jpg_raw/results_x3d" \
         --n_epochs 30 \
         --batch_size 16
 
     # Resume:
-    python step3_train_mobilenet.py ... \
-        --resume_path "G:/My Drive/.../results_mobilenet/save_5.pth"
+    python step3_train_x3d.py ... \
+        --resume_path "G:/My Drive/.../results_x3d/save_5.pth"
 """
 
 import os, json, argparse, time
@@ -37,14 +49,18 @@ parser.add_argument('--jpg_root',    type=str,
 parser.add_argument('--annotation',  type=str,
                     default='G:/My Drive/FYP_DATA_jpg_raw/dataset.json')
 parser.add_argument('--result_path', type=str,
-                    default='G:/My Drive/FYP_DATA_jpg_raw/results_mobilenet')
+                    default='G:/My Drive/FYP_DATA_jpg_raw/results_x3d')
 parser.add_argument('--n_epochs',    type=int,   default=30)
 parser.add_argument('--batch_size',  type=int,   default=16)
 parser.add_argument('--lr',          type=float, default=0.01)
 parser.add_argument('--n_workers',   type=int,   default=2)
 parser.add_argument('--n_frames',    type=int,   default=16,
-                    help='Frames per clip')
-parser.add_argument('--img_size',    type=int,   default=112)
+                    help='Frames per clip (X3D-S uses 13, but 16 works fine)')
+parser.add_argument('--img_size',    type=int,   default=160,
+                    help='X3D-S default is 160x160')
+parser.add_argument('--x3d_model',   type=str,   default='x3d_s',
+                    choices=['x3d_xs', 'x3d_s', 'x3d_m', 'x3d_l'],
+                    help='x3d_xs=fastest, x3d_s=balanced, x3d_m=better, x3d_l=best')
 parser.add_argument('--checkpoint',  type=int,   default=1,
                     help='Save checkpoint every N epochs')
 parser.add_argument('--resume_path', type=str,   default=None)
@@ -55,100 +71,28 @@ C2I       = {c: i for i, c in enumerate(CLASSES)}
 N_CLASSES = len(CLASSES)
 os.makedirs(args.result_path, exist_ok=True)
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 print(f"\nDevice     : {device}")
+print(f"X3D Model  : {args.x3d_model}")
 print(f"Frames     : {args.n_frames}")
 print(f"Image size : {args.img_size}x{args.img_size}\n")
 
-# ── MobileNet3D Model ─────────────────────────────────────────────────────────
-class ConvBnRelu(nn.Sequential):
-    def __init__(self, in_ch, out_ch, kernel, stride=1, padding=0, groups=1):
-        super().__init__(
-            nn.Conv3d(in_ch, out_ch, kernel, stride=stride,
-                      padding=padding, groups=groups, bias=False),
-            nn.BatchNorm3d(out_ch),
-            nn.ReLU6(inplace=True)
-        )
-
-class DepthwiseSeparable3D(nn.Module):
-    """3D Depthwise Separable Convolution — core of MobileNet3D"""
-    def __init__(self, in_ch, out_ch, stride=1):
-        super().__init__()
-        self.dw = ConvBnRelu(in_ch, in_ch, kernel=(3,3,3),
-                             stride=(1,stride,stride),
-                             padding=(1,1,1), groups=in_ch)
-        self.pw = ConvBnRelu(in_ch, out_ch, kernel=(1,1,1))
-
-    def forward(self, x):
-        return self.pw(self.dw(x))
-
-class MobileNet3D(nn.Module):
-    """
-    MobileNet3D for video action recognition.
-    Input: [B, 3, T, H, W]
-    """
-    def __init__(self, n_classes=5, width_mult=1.0):
-        super().__init__()
-
-        def ch(c): return max(1, int(c * width_mult))
-
-        self.features = nn.Sequential(
-            # stem
-            ConvBnRelu(3, ch(32), kernel=(3,3,3),
-                       stride=(1,2,2), padding=(1,1,1)),
-            # depthwise separable blocks
-            DepthwiseSeparable3D(ch(32),  ch(64),  stride=1),
-            DepthwiseSeparable3D(ch(64),  ch(128), stride=2),
-            DepthwiseSeparable3D(ch(128), ch(128), stride=1),
-            DepthwiseSeparable3D(ch(128), ch(256), stride=2),
-            DepthwiseSeparable3D(ch(256), ch(256), stride=1),
-            DepthwiseSeparable3D(ch(256), ch(512), stride=2),
-            # 5x repeated blocks
-            DepthwiseSeparable3D(ch(512), ch(512), stride=1),
-            DepthwiseSeparable3D(ch(512), ch(512), stride=1),
-            DepthwiseSeparable3D(ch(512), ch(512), stride=1),
-            DepthwiseSeparable3D(ch(512), ch(512), stride=1),
-            DepthwiseSeparable3D(ch(512), ch(512), stride=1),
-            DepthwiseSeparable3D(ch(512), ch(1024), stride=2),
-            DepthwiseSeparable3D(ch(1024), ch(1024), stride=1),
-        )
-        self.pool       = nn.AdaptiveAvgPool3d(1)
-        self.dropout    = nn.Dropout(0.5)
-        self.classifier = nn.Linear(ch(1024), n_classes)
-
-        # weight init
-        for m in self.modules():
-            if isinstance(m, nn.Conv3d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out')
-            elif isinstance(m, nn.BatchNorm3d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-            elif isinstance(m, nn.Linear):
-                nn.init.normal_(m.weight, 0, 0.01)
-                nn.init.constant_(m.bias, 0)
-
-    def forward(self, x):
-        x = self.features(x)
-        x = self.pool(x)
-        x = x.view(x.size(0), -1)
-        x = self.dropout(x)
-        return self.classifier(x)
-
 # ── Augmentation ──────────────────────────────────────────────────────────────
 train_transform = transforms.Compose([
-    transforms.Resize((args.img_size + 16, args.img_size + 16)),
+    transforms.Resize((args.img_size + 20, args.img_size + 20)),
     transforms.RandomCrop(args.img_size),
     transforms.RandomHorizontalFlip(),
     transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.2),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225]),
+    transforms.Normalize([0.45, 0.45, 0.45],
+                         [0.225, 0.225, 0.225]),
 ])
 
 val_transform = transforms.Compose([
     transforms.Resize((args.img_size, args.img_size)),
     transforms.ToTensor(),
-    transforms.Normalize([0.485, 0.456, 0.406],
-                         [0.229, 0.224, 0.225]),
+    transforms.Normalize([0.45, 0.45, 0.45],
+                         [0.225, 0.225, 0.225]),
 ])
 
 # ── Dataset ───────────────────────────────────────────────────────────────────
@@ -188,7 +132,6 @@ class VideoDataset(Dataset):
             return torch.zeros(3, self.n_frames,
                                args.img_size, args.img_size)
 
-        # uniform sampling
         indices = np.linspace(0, total - 1, self.n_frames, dtype=int)
         frames  = []
         for i in indices:
@@ -200,8 +143,7 @@ class VideoDataset(Dataset):
                                 (args.img_size, args.img_size), (0,0,0))
             frames.append(self.transform(img))
 
-        # [T, 3, H, W] → [3, T, H, W]
-        return torch.stack(frames, 0).permute(1, 0, 2, 3)
+        return torch.stack(frames, 0).permute(1, 0, 2, 3)  # [3, T, H, W]
 
     def __len__(self):
         return len(self.samples)
@@ -209,6 +151,47 @@ class VideoDataset(Dataset):
     def __getitem__(self, idx):
         vid_dir, label = self.samples[idx]
         return self._load_clip(vid_dir), label
+
+# ── Model ─────────────────────────────────────────────────────────────────────
+def build_model():
+    # Try 1: torch.hub X3D (pretrained Kinetics-400)
+    try:
+        model = torch.hub.load(
+            'facebookresearch/pytorchvideo',
+            args.x3d_model,
+            pretrained=True
+        )
+        # Replace final projection head for our classes
+        # X3D head: model.blocks[-1].proj
+        in_features = model.blocks[-1].proj.in_features
+        model.blocks[-1].proj = nn.Linear(in_features, N_CLASSES)
+        print(f"✅ {args.x3d_model.upper()} loaded from torch.hub "
+              f"(pretrained Kinetics-400)")
+        return model, 'x3d_hub'
+    except Exception as e:
+        print(f"[INFO] torch.hub failed: {e}")
+
+    # Try 2: pytorchvideo direct
+    try:
+        from pytorchvideo.models.x3d import create_x3d
+        model = create_x3d(
+            input_clip_length=args.n_frames,
+            input_crop_size=args.img_size,
+            model_num_class=N_CLASSES,
+        )
+        print(f"✅ X3D built via pytorchvideo.models")
+        return model, 'x3d_ptv'
+    except Exception as e:
+        print(f"[INFO] pytorchvideo direct failed: {e}")
+
+    # Fallback: R3D-18 (torchvision built-in, always available)
+    print("[WARN] X3D not available — using R3D-18 fallback")
+    print("       Install pytorchvideo: pip install pytorchvideo")
+    from torchvision.models.video import r3d_18, R3D_18_Weights
+    model = r3d_18(weights=R3D_18_Weights.DEFAULT)
+    model.fc = nn.Linear(model.fc.in_features, N_CLASSES)
+    print("✅ R3D-18 fallback loaded (pretrained Kinetics-400)")
+    return model, 'r3d18_fallback'
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 def save_log(path, epoch, loss, acc, lr):
@@ -285,11 +268,12 @@ def val_epoch(model, loader, criterion):
                 if lbl == pred:
                     class_correct[lbl] += 1
 
-    per_class = {
-        CLASSES[i]: (f"{class_correct[i]}/{class_total[i]} "
-                     f"({100*class_correct[i]/max(1,class_total[i]):.1f}%)")
-        for i in range(N_CLASSES)
-    }
+    per_class = {}
+    for i in range(N_CLASSES):
+        acc_pct = 100 * class_correct[i] / max(1, class_total[i])
+        per_class[CLASSES[i]] = (
+            f"{class_correct[i]}/{class_total[i]} ({acc_pct:.1f}%)"
+        )
     return total_loss / len(loader), correct / total, per_class
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -314,15 +298,17 @@ if __name__ == '__main__':
         num_workers=args.n_workers, pin_memory=True,
         persistent_workers=args.n_workers > 0)
 
-    print("\nBuilding MobileNet3D model...")
-    model = MobileNet3D(n_classes=N_CLASSES, width_mult=1.0).to(device)
+    print("\nBuilding model...")
+    model, model_type = build_model()
+    model = model.to(device)
 
     total_params = sum(p.numel() for p in model.parameters())
-    print(f"✅ MobileNet3D built  |  Parameters: {total_params/1e6:.2f}M")
+    print(f"   Parameters: {total_params/1e6:.2f}M")
 
-    # weighted loss for class imbalance
-    # fight=1.61, Normal=0.53, unsafeClimb=1.53, unsafeJump=1.17, unsafeThrow=1.03
-    weights = torch.tensor([1.125, 0.506, 1.475, 0.991, 1.548, 1.252]).to(device)
+    # weighted loss
+    # fight=1.61, Normal=0.53, unsafeClimb=1.53, unsafeJump=1.17,
+    # unsafeThrow=1.03, fall=1.50
+    weights   = torch.tensor([1.61, 0.53, 1.53, 1.17, 1.03, 1.50]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weights)
 
     optimizer = torch.optim.SGD(
@@ -347,8 +333,8 @@ if __name__ == '__main__':
             scheduler.load_state_dict(ckpt['scheduler'])
         start_epoch  = ckpt.get('epoch', 1) + 1
         best_val_acc = ckpt.get('best_val_acc', 0.0)
-        print(f"✅ Resumed from epoch {start_epoch - 1}  "
-              f"(best val acc so far: {best_val_acc*100:.2f}%)")
+        print(f"✅ Resumed from epoch {start_epoch-1} "
+              f"(best val: {best_val_acc*100:.2f}%)")
 
     # save opts
     import json as _json
@@ -356,8 +342,9 @@ if __name__ == '__main__':
         _json.dump(vars(args), f, indent=2)
 
     print(f"\n{'='*60}")
-    print(f" Model      : MobileNet3D")
+    print(f" Model      : {model_type}")
     print(f" Params     : {total_params/1e6:.2f}M")
+    print(f" Classes    : {N_CLASSES} → {CLASSES}")
     print(f" Train vids : {len(train_ds)}")
     print(f" Val vids   : {len(val_ds)}")
     print(f" Epochs     : {args.n_epochs}")
@@ -385,38 +372,39 @@ if __name__ == '__main__':
               f"| Train Loss: {tr_loss:.4f}  Acc: {tr_acc*100:.2f}%"
               f"  | Val Loss: {vl_loss:.4f}  Acc: {vl_acc*100:.2f}%"
               f"  | {elapsed:.0f}s")
-        print("  Per-class val acc:")
+
+        print("  Per-class val:")
         for cls, stat in per_cls.items():
-            marker = "✅" if "100" in stat else ("⚠️" if float(
-                stat.split("(")[1].replace("%)","")) >= 50 else "❌")
+            pct = float(stat.split('(')[1].replace('%)', ''))
+            marker = "✅" if pct >= 70 else ("⚠️" if pct >= 50 else "❌")
             print(f"    {marker} {cls:15s}: {stat}")
         print()
 
         save_log(train_log, epoch, tr_loss, tr_acc, lr)
         save_log(val_log,   epoch, vl_loss, vl_acc, lr)
 
-        # save checkpoint every N epochs
+        # checkpoint
         if epoch % args.checkpoint == 0:
             p = os.path.join(args.result_path, f'save_{epoch}.pth')
             torch.save({
                 'epoch':        epoch,
+                'model_type':   model_type,
                 'state_dict':   model.state_dict(),
                 'optimizer':    optimizer.state_dict(),
                 'scheduler':    scheduler.state_dict(),
                 'best_val_acc': best_val_acc,
-                'model':        'mobilenet3d',
             }, p)
-            print(f"  💾 Checkpoint saved: save_{epoch}.pth")
+            print(f"  💾 Checkpoint: save_{epoch}.pth")
 
-        # save best model
+        # best model
         if vl_acc > best_val_acc:
             best_val_acc = vl_acc
             p = os.path.join(args.result_path, 'best_model.pth')
             torch.save({
                 'epoch':      epoch,
+                'model_type': model_type,
                 'state_dict': model.state_dict(),
                 'val_acc':    vl_acc,
-                'model':      'mobilenet3d',
             }, p)
             print(f"  🏆 Best val acc: {vl_acc*100:.2f}% → best_model.pth\n")
 
