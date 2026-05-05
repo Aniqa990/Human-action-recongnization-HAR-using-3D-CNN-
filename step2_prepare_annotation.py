@@ -77,17 +77,23 @@ print(f"  {'TOTAL':15s}: {total_videos} videos")
 if missing:
     print(f"\n[WARN] Missing class folders: {missing}")
 
-# split per class (stratified)
+# print counts first, then split
+print("\nDetailed count before splitting:")
+print(f"{'Class':15s} {'Total':>8s} {'Train':>8s} {'Val':>8s} {'Test':>8s}")
+print("-" * 50)
+
 split_counts = {'training': 0, 'validation': 0, 'testing': 0}
 
 for cls in CLASSES:
     vids = per_class[cls]
     random.shuffle(vids)
 
-    n      = len(vids)
-    n_val  = max(1, int(n * args.val_split))
-    n_test = max(1, int(n * args.test_split))
+    n       = len(vids)
+    n_val   = max(1, int(n * args.val_split))
+    n_test  = max(1, int(n * args.test_split))
     n_train = n - n_val - n_test
+
+    print(f"{cls:15s} {n:>8d} {n_train:>8d} {n_val:>8d} {n_test:>8d}")
 
     splits = (
         [('training',   v) for v in vids[:n_train]] +
@@ -104,6 +110,9 @@ for cls in CLASSES:
             }
         }
         split_counts[subset] += 1
+
+print("-" * 50)
+print(f"{'TOTAL':15s} {sum(len(v) for v in per_class.values()):>8d} ", end='')
 
 # save
 annotation = {'labels': CLASSES, 'database': database}
