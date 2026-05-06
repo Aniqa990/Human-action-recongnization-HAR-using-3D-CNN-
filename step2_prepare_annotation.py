@@ -33,13 +33,11 @@ from pathlib import Path
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--jpg_root',   type=str,
-                    default='G:/My Drive/Segmented_FYP_DATA_jpg_raw')
+                    default='G:/My Drive/FYP_DATA_jpg_raw')
 parser.add_argument('--output',     type=str,
-                    default='G:/My Drive/Segmented_FYP_DATA_jpg_raw/dataset.json')
+                    default='G:/My Drive/FYP_DATA_jpg_raw/dataset.json')
 parser.add_argument('--val_split',  type=float, default=0.2,
-                    help='Fraction for validation')
-parser.add_argument('--test_split', type=float, default=0.15,
-                    help='Fraction for testing')
+                    help='Fraction for validation (default 0.2, train=0.8)')
 parser.add_argument('--seed',       type=int, default=42)
 args = parser.parse_args()
 
@@ -52,6 +50,14 @@ missing   = []
 
 for cls in CLASSES:
     cls_dir = os.path.join(args.jpg_root, cls)
+    # ADD THESE DEBUG LINES
+    print(f"\nChecking: {cls_dir}")
+    print(f"  Exists: {os.path.exists(cls_dir)}")
+    if os.path.exists(cls_dir):
+        contents = os.listdir(cls_dir)
+        print(f"  Items inside: {len(contents)}")
+        print(f"  First 3: {contents[:3]}")
+    # END DEBUG LINES
     if not os.path.exists(cls_dir):
         missing.append(cls)
         continue
@@ -78,11 +84,12 @@ if missing:
     print(f"\n[WARN] Missing class folders: {missing}")
 
 # print counts first, then split
-print("\nDetailed count before splitting:")
-print(f"{'Class':15s} {'Total':>8s} {'Train':>8s} {'Val':>8s} {'Test':>8s}")
-print("-" * 50)
 
-split_counts = {'training': 0, 'validation': 0, 'testing': 0}
+print("\nDetailed count before splitting:")
+print(f"{'Class':15s} {'Total':>8s} {'Train':>8s} {'Val':>8s}")
+print("-" * 40)
+
+split_counts = {'training': 0, 'validation': 0}
 
 for cls in CLASSES:
     vids = per_class[cls]
@@ -90,15 +97,13 @@ for cls in CLASSES:
 
     n       = len(vids)
     n_val   = max(1, int(n * args.val_split))
-    n_test  = max(1, int(n * args.test_split))
-    n_train = n - n_val - n_test
+    n_train = n - n_val
 
-    print(f"{cls:15s} {n:>8d} {n_train:>8d} {n_val:>8d} {n_test:>8d}")
+    print(f"{cls:15s} {n:>8d} {n_train:>8d} {n_val:>8d}")
 
     splits = (
         [('training',   v) for v in vids[:n_train]] +
-        [('validation', v) for v in vids[n_train:n_train+n_val]] +
-        [('testing',    v) for v in vids[n_train+n_val:]]
+        [('validation', v) for v in vids[n_train:]]
     )
 
     for subset, (vid_name, n_frames) in splits:
@@ -111,7 +116,7 @@ for cls in CLASSES:
         }
         split_counts[subset] += 1
 
-print("-" * 50)
+print("-" * 40)
 print(f"{'TOTAL':15s} {sum(len(v) for v in per_class.values()):>8d} ", end='')
 
 # save

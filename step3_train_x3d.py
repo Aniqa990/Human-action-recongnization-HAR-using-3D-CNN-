@@ -385,16 +385,39 @@ if __name__ == '__main__':
 
         # checkpoint
         if epoch % args.checkpoint == 0:
-            p = os.path.join(args.result_path, f'save_{epoch}.pth')
-            torch.save({
-                'epoch':        epoch,
-                'model_type':   model_type,
-                'state_dict':   model.state_dict(),
-                'optimizer':    optimizer.state_dict(),
-                'scheduler':    scheduler.state_dict(),
-                'best_val_acc': best_val_acc,
-            }, p)
-            print(f"  💾 Checkpoint: save_{epoch}.pth")
+            # Save in result_path directory
+            p_result = os.path.join(args.result_path, f'save_{epoch}.pth')
+            print(f"Saving checkpoint to: {p_result}")
+            try:
+                torch.save({
+                    'epoch':        epoch,
+                    'model_type':   model_type,
+                    'state_dict':   model.state_dict(),
+                    'optimizer':    optimizer.state_dict(),
+                    'scheduler':    scheduler.state_dict(),
+                    'best_val_acc': best_val_acc,
+                }, p_result)
+                print(f"  💾 Checkpoint saved in result_path: save_{epoch}.pth")
+            except Exception as e:
+                print(f"Failed to save checkpoint in result_path: {e}")
+
+            # Save in x3d_result folder in project root
+            x3d_root_dir = os.path.join(os.getcwd(), 'x3d_result')
+            os.makedirs(x3d_root_dir, exist_ok=True)
+            p_root = os.path.join(x3d_root_dir, f'save_{epoch}.pth')
+            print(f"Saving checkpoint to project root x3d_result: {p_root}")
+            try:
+                torch.save({
+                    'epoch':        epoch,
+                    'model_type':   model_type,
+                    'state_dict':   model.state_dict(),
+                    'optimizer':    optimizer.state_dict(),
+                    'scheduler':    scheduler.state_dict(),
+                    'best_val_acc': best_val_acc,
+                }, p_root)
+                print(f"  💾 Checkpoint saved in project root x3d_result: save_{epoch}.pth")
+            except Exception as e:
+                print(f"Failed to save checkpoint in project root x3d_result: {e}")
 
         # best model
         if vl_acc > best_val_acc:

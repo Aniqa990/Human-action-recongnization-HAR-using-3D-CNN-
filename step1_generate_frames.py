@@ -125,7 +125,8 @@ def convert_video(job):
     except Exception as e:
         return f"ERROR {e}: {src_video}"
 
-# collect jobs
+
+# collect jobs from main classes
 jobs = []
 skipped_classes = []
 for cls in CLASSES:
@@ -139,6 +140,30 @@ for cls in CLASSES:
             video_name = Path(fname).stem
             dst = os.path.join(args.jpg_root, cls, video_name).replace('\\', '/')
             jobs.append((fpath, dst))
+
+# Add jobs for augmented climbAdult → unsafeClimb
+aug_climb_dir = os.path.join('G:/My Drive/Augmented_FYP_Data', 'climbAdult')
+if os.path.exists(aug_climb_dir):
+    for fname in os.listdir(aug_climb_dir):
+        fpath = os.path.join(aug_climb_dir, fname).replace('\\', '/')
+        if is_video(fpath):
+            video_name = Path(fname).stem
+            dst = os.path.join(args.jpg_root, 'unsafeClimb', video_name).replace('\\', '/')
+            jobs.append((fpath, dst))
+else:
+    print('[WARN] Augmented climbAdult folder not found:', aug_climb_dir)
+
+# Add jobs for augmented throwAdult → unsafeThrow
+aug_throw_dir = os.path.join('G:/My Drive/Augmented_FYP_Data', 'throwAdult')
+if os.path.exists(aug_throw_dir):
+    for fname in os.listdir(aug_throw_dir):
+        fpath = os.path.join(aug_throw_dir, fname).replace('\\', '/')
+        if is_video(fpath):
+            video_name = Path(fname).stem
+            dst = os.path.join(args.jpg_root, 'unsafeThrow', video_name).replace('\\', '/')
+            jobs.append((fpath, dst))
+else:
+    print('[WARN] Augmented throwAdult folder not found:', aug_throw_dir)
 
 print(f"Total videos: {len(jobs)}")
 if skipped_classes:

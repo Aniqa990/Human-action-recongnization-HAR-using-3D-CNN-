@@ -8,3 +8,21 @@ python main.py --root_path "G:/My Drive/DATASET_jpg" --video_path . --annotation
 
 for fine tunning
 python main.py --root_path "G:/My Drive/Segmented_FYP_DATA_jpg" --video_path . --annotation_path "G:/My Drive/Segmented_FYP_DATA_jpg/dataset.json" --result_path "G:/My Drive/Segmented_FYP_DATA_jpg/results" --dataset ucf101 --model resnet --model_depth 50 --n_classes 5 --n_pretrain_classes 700 --pretrain_path "G:/My Drive/Segmented_FYP_DATA_jpg/models/r3d50_K_200ep.pth" --ft_begin_module fc --batch_size 32 --n_threads 4 --checkpoint 5 --n_epochs 30
+
+---
+
+step 01:
+
+python step1_generate_frames.py --video_root "G:/My Drive/Augmented_FYP_Data" --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --n_workers 8
+
+Step 02:
+
+python step2_prepare_annotation.py --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --output "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" --val_split 0.2
+
+for mobilenet:
+python step3_train_mobilenet.py --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --annotation "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "G:/My Drive/FYP_DATA_jpg_raw/results_mobilenet" --n_epochs 30 --batch_size 16 --n_workers 8 --resume_path "G:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/save_1.pth"
+
+for X3D:
+python step3_train_x3d.py --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --annotation "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "G:/My Drive/FYP_DATA_jpg_raw/results_x3d" --n_epochs 30 --batch_size 16 --n_workers 8
+
+--resume_path "G:/My Drive/FYP_DATA_jpg_raw/results_x3d/save_X.pth"

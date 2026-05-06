@@ -397,16 +397,39 @@ if __name__ == '__main__':
 
         # save checkpoint every N epochs
         if epoch % args.checkpoint == 0:
-            p = os.path.join(args.result_path, f'save_{epoch}.pth')
-            torch.save({
-                'epoch':        epoch,
-                'state_dict':   model.state_dict(),
-                'optimizer':    optimizer.state_dict(),
-                'scheduler':    scheduler.state_dict(),
-                'best_val_acc': best_val_acc,
-                'model':        'mobilenet3d',
-            }, p)
-            print(f"  💾 Checkpoint saved: save_{epoch}.pth")
+            # Save in result_path directory
+            p_result = os.path.join(args.result_path, f'save_{epoch}.pth')
+            print(f"Saving checkpoint to: {p_result}")
+            try:
+                torch.save({
+                    'epoch':        epoch,
+                    'state_dict':   model.state_dict(),
+                    'optimizer':    optimizer.state_dict(),
+                    'scheduler':    scheduler.state_dict(),
+                    'best_val_acc': best_val_acc,
+                    'model':        'mobilenet3d',
+                }, p_result)
+                print(f"  💾 Checkpoint saved in result_path: save_{epoch}.pth")
+            except Exception as e:
+                print(f"Failed to save checkpoint in result_path: {e}")
+
+            # Save in mobilenet_result folder in project root
+            mobilenet_root_dir = os.path.join(os.getcwd(), 'mobilenet_result')
+            os.makedirs(mobilenet_root_dir, exist_ok=True)
+            p_root = os.path.join(mobilenet_root_dir, f'save_{epoch}.pth')
+            print(f"Saving checkpoint to project root mobilenet_result: {p_root}")
+            try:
+                torch.save({
+                    'epoch':        epoch,
+                    'state_dict':   model.state_dict(),
+                    'optimizer':    optimizer.state_dict(),
+                    'scheduler':    scheduler.state_dict(),
+                    'best_val_acc': best_val_acc,
+                    'model':        'mobilenet3d',
+                }, p_root)
+                print(f"  💾 Checkpoint saved in project root mobilenet_result: save_{epoch}.pth")
+            except Exception as e:
+                print(f"Failed to save checkpoint in project root mobilenet_result: {e}")
 
         # save best model
         if vl_acc > best_val_acc:
