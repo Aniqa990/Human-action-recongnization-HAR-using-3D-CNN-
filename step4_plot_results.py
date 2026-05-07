@@ -1,166 +1,185 @@
-"""
-STEP 4: plot_results.py
-Reads train.txt / val.txt / train_batch.txt and generates training graphs.
-
-Usage:
-    python step4_plot_results.py \
-        --result_path "G:/My Drive/Segmented_FYP_DATA_jpg_raw/results_slowfast"
-"""
-
-import argparse, os, re
-import matplotlib
-matplotlib.use('Agg')
+import os
+import json
+import torch
 import matplotlib.pyplot as plt
-import matplotlib.gridspec as gridspec
 import numpy as np
+from sklearn.metrics import confusion_matrix, classification_report, ConfusionMatrixDisplay
+import seaborn as sns
+import pandas as pd
+import platform
+import time
 
-parser = argparse.ArgumentParser()
-parser.add_argument('--result_path', type=str,
-                    default='G:/My Drive/Segmented_FYP_DATA_jpg_raw/results_slowfast')
-args = parser.parse_args()
-rp = args.result_path
+# # 1. Load logs
+# train_log = 'results_x3d/train.txt'  # or results_mobilenet/train.txt
+# val_log = 'results_x3d/val.txt'
+# batch_log = 'results_x3d/train_batch.txt'
 
-def find(folder, names):
-    for n in names:
-        p = os.path.join(folder, n)
-        if os.path.exists(p): return p
-    return None
+train_log = 'H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/train'
+val_log = 'H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/val'
+batch_log = 'H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/train_batch'
 
-def parse_epoch_log(filepath):
-    epochs, losses, accs = [], [], []
-    if not filepath: return epochs, losses, accs
-    with open(filepath, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line: continue
-            parts = re.split(r'[\t,\s]+', line)
-            try: float(parts[0])
-            except: continue
-            if len(parts) >= 3:
-                epochs.append(int(float(parts[0])))
-                losses.append(float(parts[1]))
-                accs.append(float(parts[2]))
-    return epochs, losses, accs
+# --- Google Drive file existence and open test ---
+for f in [train_log, val_log, batch_log]:
+    print(f"Testing file: {f}")
+    if not os.path.exists(f):
+        print(f"ERROR: File not found: {f}")
+        print("If this is a Google Drive folder, right-click it in Explorer and select 'Available offline'.")
+        exit(1)
+    try:
+        with open(f, 'r') as testfile:
+            print(f"First line of {f}: {testfile.readline().strip()}")
+    except Exception as e:
+        print(f"ERROR: Could not open {f}: {e}")
+        print("If this is a Google Drive folder, right-click it in Explorer and select 'Available offline'.")
+        exit(1)
 
-def parse_batch_log(filepath):
-    iters, losses, accs = [], [], []
-    if not filepath: return iters, losses, accs
-    with open(filepath, 'r') as f:
-        for line in f:
-            line = line.strip()
-            if not line: continue
-            parts = re.split(r'[\t,\s]+', line)
-            try: float(parts[0])
-            except: continue
-            if len(parts) >= 5:
-                iters.append(int(float(parts[2])))
-                losses.append(float(parts[3]))
-                accs.append(float(parts[4]))
-    return iters, losses, accs
 
-train_ep, train_lo, train_ac = parse_epoch_log(find(rp, ['train.txt','train.log']))
-val_ep,   val_lo,   val_ac   = parse_epoch_log(find(rp, ['val.txt',  'val.log']))
-b_it,     b_lo,     b_ac     = parse_batch_log(find(rp, ['train_batch.txt','train_batch.log']))
+def load_log(path):
+    if not os.path.exists(path):
+        print(f"ERROR: File not found: {path}")
+        print(f"Current working directory: {os.getcwd()}")
+        print(f"Files in results_mobilenet: {os.listdir('results_mobilenet') if os.path.exists('results_mobilenet') else 'results_mobilenet folder not found!'}")
+        exit(1)
+    data = pd.read_csv(path, sep='\t')
+    return data
 
-has_train = len(train_ep) > 0
-has_val   = len(val_ep)   > 0
-has_batch = len(b_it)     > 0
+train = load_log(train_log)
+val = load_log(val_log)
 
-print(f"Train epochs: {train_ep}")
-print(f"Val   epochs: {val_ep}")
-print(f"Batch steps : {len(b_it)}")
+# 2. Plot Loss and Accuracy
+plt.figure(figsize=(12,5))
+plt.subplot(1,2,1)
+plt.plot(train['epoch'], train['loss'], label='Train Loss')
+plt.plot(val['epoch'], val['loss'], label='Val Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.legend()
+plt.title('Loss vs. Epoch')
 
-if not has_train and not has_val:
-    print("❌ No data found"); exit(1)
+plt.subplot(1,2,2)
+plt.plot(train['epoch'], train['acc'], label='Train Acc')
+plt.plot(val['epoch'], val['acc'], label='Val Acc')
+plt.xlabel('Epoch')
+plt.ylabel('Accuracy')
+plt.legend()
+plt.title('Accuracy vs. Epoch')
+plt.tight_layout()
+plt.savefig('results_x3d/loss_acc.png')
+plt.show()
 
-try:    plt.style.use('seaborn-v0_8-darkgrid')
-except: plt.style.use('ggplot')
+# 3. Confusion Matrix and Classification Report
+# You need to run your test script and save predictions and true labels
+# Example: save as test_results.json with {'y_true': [...], 'y_pred': [...]}
+with open('test_results.json') as f:
+    results = json.load(f)
+y_true = results['y_true']
+y_pred = results['y_pred']
+labels = ['fight', 'Normal', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall']
 
-C = dict(tl='#E74C3C', vl='#3498DB', ta='#2ECC71', va='#F39C12', b='#9B59B6')
-fig = plt.figure(figsize=(18, 13))
-fig.suptitle('SlowFast / Two-Stream  |  FYP Training Results\n(Child Safety Action Recognition)',
-             fontsize=16, fontweight='bold', y=0.98)
-gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.42, wspace=0.32)
+cm = confusion_matrix(y_true, y_pred)
+disp = ConfusionMatrixDisplay(confusion_matrix=cm, display_labels=labels)
+disp.plot(cmap='Blues')
+plt.title('Confusion Matrix')
+plt.savefig('results_x3d/confusion_matrix.png')
+plt.show()
 
-# 1. Loss
-ax1 = fig.add_subplot(gs[0,0])
-if has_train: ax1.plot(train_ep, train_lo, color=C['tl'], marker='o', markersize=5, linewidth=2, label='Train Loss')
-if has_val:   ax1.plot(val_ep,   val_lo,   color=C['vl'], marker='s', markersize=5, linewidth=2, linestyle='--', label='Val Loss')
-ax1.set_title('Training & Validation Loss', fontweight='bold')
-ax1.set_xlabel('Epoch'); ax1.set_ylabel('Loss'); ax1.legend()
+print("Classification Report:")
+print(classification_report(y_true, y_pred, target_names=labels))
 
-# 2. Accuracy
-ax2 = fig.add_subplot(gs[0,1])
-if has_train: ax2.plot(train_ep, [a*100 for a in train_ac], color=C['ta'], marker='o', markersize=5, linewidth=2, label='Train Acc')
-if has_val:   ax2.plot(val_ep,   [a*100 for a in val_ac],   color=C['va'], marker='s', markersize=5, linewidth=2, linestyle='--', label='Val Acc')
-ax2.set_title('Training & Validation Accuracy', fontweight='bold')
-ax2.set_xlabel('Epoch'); ax2.set_ylabel('Accuracy (%)'); ax2.legend()
+# 4. Per-class accuracy bar plot
+acc_per_class = cm.diagonal() / cm.sum(axis=1)
+plt.figure(figsize=(8,4))
+sns.barplot(x=labels, y=acc_per_class)
+plt.ylabel('Accuracy')
+plt.title('Per-class Accuracy')
+plt.savefig('results_x3d/per_class_accuracy.png')
+plt.show()
 
-# 3. Batch loss
-ax3 = fig.add_subplot(gs[0,2])
-if has_batch:
-    w = max(1, len(b_lo)//60)
-    sm = np.convolve(b_lo, np.ones(w)/w, mode='valid')
-    ax3.plot(b_it, b_lo, color=C['b'], alpha=0.15, linewidth=0.7)
-    ax3.plot(b_it[w-1:], sm, color=C['b'], linewidth=2, label='Smoothed')
-    ax3.set_title('Batch-Level Loss', fontweight='bold')
-    ax3.set_xlabel('Iteration'); ax3.set_ylabel('Loss'); ax3.legend()
+# 5. Hardware and timing info
+print("System:", platform.platform())
+print("Python:", platform.python_version())
+if torch.cuda.is_available():
+    print("CUDA:", torch.version.cuda)
+    print("GPU:", torch.cuda.get_device_name(0))
+    print("GPU Memory (GB):", torch.cuda.get_device_properties(0).total_memory / 1e9)
 else:
-    ax3.text(0.5,0.5,'No batch log',ha='center',va='center',transform=ax3.transAxes,fontsize=12)
-    ax3.set_title('Batch-Level Loss', fontweight='bold')
+    print("CPU only")
 
-# 4. Batch accuracy
-ax4 = fig.add_subplot(gs[1,0])
-if has_batch:
-    w2 = max(1, len(b_ac)//60)
-    sm2 = np.convolve(b_ac, np.ones(w2)/w2, mode='valid')
-    ax4.plot(b_it, [a*100 for a in b_ac], color=C['ta'], alpha=0.15, linewidth=0.7)
-    ax4.plot(b_it[w2-1:], [a*100 for a in sm2], color=C['ta'], linewidth=2, label='Smoothed')
-    ax4.set_title('Batch-Level Accuracy', fontweight='bold')
-    ax4.set_xlabel('Iteration'); ax4.set_ylabel('Accuracy (%)'); ax4.legend()
-else:
-    ax4.text(0.5,0.5,'No batch log',ha='center',va='center',transform=ax4.transAxes,fontsize=12)
-    ax4.set_title('Batch-Level Accuracy', fontweight='bold')
+# 6. Model parameter count (example for X3D)
+# from step3_train_x3d.py, after model is built:
+# total_params = sum(p.numel() for p in model.parameters())
+# print(f"Total parameters: {total_params}")
 
-# 5. Summary table
-ax5 = fig.add_subplot(gs[1,1]); ax5.axis('off')
-rows = []
-if has_train:
-    bta=max(train_ac); bte=train_ep[train_ac.index(bta)]
-    rows += [('Best Train Acc', f'{bta*100:.2f}%  (ep {bte})'),
-             ('Min Train Loss', f'{min(train_lo):.4f}'),
-             ('Final Train Acc',f'{train_ac[-1]*100:.2f}%')]
-if has_val:
-    bva=max(val_ac); bve=val_ep[val_ac.index(bva)]
-    rows += [('Best Val Acc', f'{bva*100:.2f}%  (ep {bve})'),
-             ('Min Val Loss', f'{min(val_lo):.4f}'),
-             ('Final Val Acc',f'{val_ac[-1]*100:.2f}%')]
-if has_train:
-    rows += [('Epochs', f'{min(train_ep)} → {max(train_ep)}')]
-if rows:
-    tbl = ax5.table(cellText=rows, colLabels=['Metric','Value'],
-                    cellLoc='center', loc='center', bbox=[0,0.05,1,0.90])
-    tbl.auto_set_font_size(False); tbl.set_fontsize(11)
-    for (r,c), cell in tbl.get_celld().items():
-        if r==0: cell.set_facecolor('#2C3E50'); cell.set_text_props(color='white',fontweight='bold')
-        elif r%2==0: cell.set_facecolor('#ECF0F1')
-ax5.set_title('Summary Statistics', fontweight='bold', pad=10)
+# 7. (Optional) ROC curves, if you want
 
-# 6. Combined dual axis
-ax6 = fig.add_subplot(gs[1,2])
-ax6b = ax6.twinx()
-if has_train:
-    ax6.plot(train_ep, train_lo, color=C['tl'], marker='o', markersize=4, linewidth=2, label='Train Loss')
-    ax6b.plot(train_ep, [a*100 for a in train_ac], color=C['ta'], marker='^', markersize=4, linewidth=2, linestyle=':', label='Train Acc%')
-if has_val:
-    ax6.plot(val_ep, val_lo, color=C['vl'], marker='s', markersize=4, linewidth=2, linestyle='--', label='Val Loss')
-    ax6b.plot(val_ep, [a*100 for a in val_ac], color=C['va'], marker='v', markersize=4, linewidth=2, linestyle='-.', label='Val Acc%')
-ax6.set_xlabel('Epoch'); ax6.set_ylabel('Loss', color=C['tl'])
-ax6b.set_ylabel('Accuracy (%)', color=C['ta'])
-ax6.set_title('Loss & Accuracy Combined', fontweight='bold')
-all_lines = ax6.get_lines() + ax6b.get_lines()
-ax6.legend(all_lines, [l.get_label() for l in all_lines], fontsize=8)
+# 8. (Optional) Plot learning rate schedule, if you logged it
 
-out = os.path.join(rp, 'training_graphs.png')
-plt.savefig(out, dpi=150, bbox_inches='tight', facecolor='white')
-print(f"\n✅ Saved: {out}")
+# 9. (Optional) Plot batch-wise loss/accuracy using batch_log
+
+# Save all plots in your results folder for easy inclusion in your paper.
+
+# After loading your model
+total_params = sum(p.numel() for p in model.parameters())
+print(f"Total parameters: {total_params:,}")
+
+from sklearn.metrics import roc_curve, auc
+from sklearn.preprocessing import label_binarize
+
+# Binarize the output
+y_true_bin = label_binarize(y_true, classes=range(len(labels)))
+y_pred_prob = ... # shape: (n_samples, n_classes), get from your model's softmax output
+
+fpr = dict()
+tpr = dict()
+roc_auc = dict()
+for i in range(len(labels)):
+    fpr[i], tpr[i], _ = roc_curve(y_true_bin[:, i], y_pred_prob[:, i])
+    roc_auc[i] = auc(fpr[i], tpr[i])
+
+plt.figure()
+for i in range(len(labels)):
+    plt.plot(fpr[i], tpr[i], label=f'ROC curve of class {labels[i]} (area = {roc_auc[i]:.2f})')
+plt.plot([0, 1], [0, 1], 'k--')
+plt.xlabel('False Positive Rate')
+plt.ylabel('True Positive Rate')
+plt.title('Multi-class ROC Curve')
+plt.legend()
+plt.savefig('results_x3d/roc_curve.png')
+plt.show()
+
+# If you logged learning rate in your train.txt/val.txt
+plt.figure()
+plt.plot(train['epoch'], train['lr'], label='Learning Rate')
+plt.xlabel('Epoch')
+plt.ylabel('Learning Rate')
+plt.title('Learning Rate Schedule')
+plt.legend()
+plt.savefig('results_x3d/lr_schedule.png')
+plt.show()
+
+batch = pd.read_csv(batch_log, sep='\t')
+plt.figure(figsize=(12,5))
+plt.subplot(1,2,1)
+plt.plot(batch['iter'], batch['loss'])
+plt.xlabel('Iteration')
+plt.ylabel('Loss')
+plt.title('Batch-wise Loss')
+
+plt.subplot(1,2,2)
+plt.plot(batch['iter'], batch['acc'])
+plt.xlabel('Iteration')
+plt.ylabel('Accuracy')
+plt.title('Batch-wise Accuracy')
+plt.tight_layout()
+plt.savefig('results_x3d/batch_loss_acc.png')
+plt.show()
+
+summary = {
+    "total_params": int(total_params),
+    "best_val_acc": float(val['acc'].max()),
+    "confusion_matrix": cm.tolist(),
+    "classification_report": classification_report(y_true, y_pred, target_names=labels, output_dict=True),
+    # Add more as needed
+}
+with open('results_x3d/summary.json', 'w') as f:
+    json.dump(summary, f, indent=2)
