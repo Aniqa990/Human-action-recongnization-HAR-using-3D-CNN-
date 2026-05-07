@@ -20,7 +20,7 @@ Step 02:
 python step2_prepare_annotation.py --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --output "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" --val_split 0.2
 
 for mobilenet:
-python step3_train_mobilenet.py --jpg_root "H:/My Drive/FYP_DATA_jpg_raw" --annotation "H:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet" --n_epochs 30 --batch_size 16 --n_workers 8 --resume_path "H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/save_1.pth"
+python step3_train_mobilenet.py --jpg_root "H:/My Drive/FYP_DATA_jpg_raw" --annotation "H:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet" --n_epochs 30 --batch_size 16 --n_workers 8 --resume_path "H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/save_7.pth"
 
 for X3D:
 python step3_train_x3d.py --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --annotation "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "G:/My Drive/FYP_DATA_jpg_raw/results_x3d" --n_epochs 30 --batch_size 16 --n_workers 8 
