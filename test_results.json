@@ -1,89 +1,89 @@
 {
-  "model_path": "H:/My Drive/FYP_DATA_jpg_raw/results_x3d/best_model.pth",
-  "model_type": "r3d18_fallback",
+  "model_path": "H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/best_model.pth",
+  "model_type": "mobilenet",
   "test_root": "H:/My Drive/FYP_TEST_JPG",
   "total_params_M": 33.16935,
-  "overall_accuracy": 0.5972222222222222,
+  "overall_accuracy": 0.1111111111111111,
   "per_class": {
     "fight": {
-      "correct": 4,
+      "correct": 0,
       "total": 12,
-      "accuracy": 33.333333333333336
+      "accuracy": 0.0
     },
     "Normal": {
-      "correct": 14,
+      "correct": 0,
       "total": 15,
-      "accuracy": 93.33333333333333
+      "accuracy": 0.0
     },
     "unsafeClimb": {
-      "correct": 11,
+      "correct": 5,
       "total": 13,
-      "accuracy": 84.61538461538461
+      "accuracy": 38.46153846153846
     },
     "unsafeJump": {
-      "correct": 2,
+      "correct": 0,
       "total": 10,
-      "accuracy": 20.0
+      "accuracy": 0.0
     },
     "unsafeThrow": {
-      "correct": 4,
+      "correct": 0,
       "total": 14,
-      "accuracy": 28.571428571428573
+      "accuracy": 0.0
     },
     "fall": {
-      "correct": 8,
+      "correct": 3,
       "total": 8,
-      "accuracy": 100.0
+      "accuracy": 37.5
     }
   },
   "confusion_matrix": [
     [
-      4,
-      6,
       0,
       0,
       2,
-      0
-    ],
-    [
-      1,
-      14,
       0,
       0,
-      0,
-      0
+      10
     ],
     [
       0,
-      1,
-      11,
-      0,
-      0,
-      1
-    ],
-    [
-      0,
-      7,
       0,
       2,
       0,
-      1
-    ],
-    [
       0,
-      4,
-      1,
-      0,
-      4,
-      5
+      13
     ],
     [
       0,
       0,
-      0,
+      5,
       0,
       0,
       8
+    ],
+    [
+      0,
+      0,
+      0,
+      0,
+      0,
+      10
+    ],
+    [
+      0,
+      0,
+      6,
+      0,
+      0,
+      8
+    ],
+    [
+      0,
+      0,
+      5,
+      0,
+      0,
+      3
     ]
   ],
   "class_names": [
