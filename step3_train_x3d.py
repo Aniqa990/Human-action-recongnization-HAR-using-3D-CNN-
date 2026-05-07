@@ -326,11 +326,37 @@ if __name__ == '__main__':
     best_val_acc = 0.0
     if args.resume_path and os.path.exists(args.resume_path):
         ckpt = torch.load(args.resume_path, map_location=device)
-        model.load_state_dict(ckpt['state_dict'])
-        if 'optimizer' in ckpt:
-            optimizer.load_state_dict(ckpt['optimizer'])
-        if 'scheduler' in ckpt:
-            scheduler.load_state_dict(ckpt['scheduler'])
+        
+        # Check model type compatibility
+        ckpt_model_type = ckpt.get('model_type', 'unknown')
+        if ckpt_model_type != model_type:
+            print(f"⚠️  MODEL TYPE MISMATCH!")
+            print(f"    Checkpoint was saved with: {ckpt_model_type}")
+            print(f"    Current model type:        {model_type}")
+            print(f"    Loading with strict=False (keys will be skipped)\n")
+        
+        # Try strict loading first, fall back to non-strict
+        try:
+            model.load_state_dict(ckpt['state_dict'], strict=True)
+        except RuntimeError as e:
+            if "Missing key" in str(e) or "Unexpected key" in str(e):
+                print(f"⚠️  Architecture mismatch detected, loading with strict=False")
+                model.load_state_dict(ckpt['state_dict'], strict=False)
+            else:
+                raise
+        
+        if 'optimizer' in ckpt and ckpt_model_type == model_type:
+            try:
+                optimizer.load_state_dict(ckpt['optimizer'])
+            except Exception as e:
+                print(f"⚠️  Could not load optimizer state: {e}")
+        
+        if 'scheduler' in ckpt and ckpt_model_type == model_type:
+            try:
+                scheduler.load_state_dict(ckpt['scheduler'])
+            except Exception as e:
+                print(f"⚠️  Could not load scheduler state: {e}")
+        
         start_epoch  = ckpt.get('epoch', 1) + 1
         best_val_acc = ckpt.get('best_val_acc', 0.0)
         print(f"✅ Resumed from epoch {start_epoch-1} "

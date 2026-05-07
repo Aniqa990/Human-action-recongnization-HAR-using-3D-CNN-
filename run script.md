@@ -20,9 +20,24 @@ Step 02:
 python step2_prepare_annotation.py --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --output "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" --val_split 0.2
 
 for mobilenet:
-python step3_train_mobilenet.py --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --annotation "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "G:/My Drive/FYP_DATA_jpg_raw/results_mobilenet" --n_epochs 30 --batch_size 16 --n_workers 8 --resume_path "G:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/save_1.pth"
+python step3_train_mobilenet.py --jpg_root "H:/My Drive/FYP_DATA_jpg_raw" --annotation "H:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet" --n_epochs 30 --batch_size 16 --n_workers 8 --resume_path "H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/save_1.pth"
 
 for X3D:
-python step3_train_x3d.py --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --annotation "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "G:/My Drive/FYP_DATA_jpg_raw/results_x3d" --n_epochs 30 --batch_size 16 --n_workers 8
+python step3_train_x3d.py --jpg_root "G:/My Drive/FYP_DATA_jpg_raw" --annotation "G:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "G:/My Drive/FYP_DATA_jpg_raw/results_x3d" --n_epochs 30 --batch_size 16 --n_workers 8 
 
---resume_path "G:/My Drive/FYP_DATA_jpg_raw/results_x3d/save_X.pth"
+python step3_train_x3d.py --jpg_root "H:/My Drive/FYP_DATA_jpg_raw" --annotation "H:/My Drive/FYP_DATA_jpg_raw/dataset.json" --result_path "H:/My Drive/FYP_DATA_jpg_raw/results_x3d" --n_epochs 30 --batch_size 16 --n_workers 8 --resume_path "H:/My Drive/FYP_DATA_jpg_raw/results_x3d/save_5.pth"
+
+
+for testing:
+
+step 1:
+python step1_generate_frames.py --video_root "H:\My Drive\FYP_TEST_VIDEOS" --jpg_root "H:\My Drive\FYP_TEST_JPG" --n_workers 8
+
+step 03:
+python step4_test_x3d.py --model_path "H:/My Drive/FYP_DATA_jpg_raw/results_x3d/best_model.pth" --jpg_root "H:/My Drive/FYP_TEST_JPG" --annotation "H:/My Drive/FYP_TEST_JPG/dataset.json" --batch_size 16 --n_frames 16 --img_size 160
+
+# Test X3D
+python step4_test_x3d.py --model_path "H:/My Drive/FYP_DATA_jpg_raw/results_x3d/best_model.pth" --jpg_root "H:/My Drive/FYP_TEST_JPG"
+
+# Test MobileNet (just change the path!)
+python step4_test_x3d.py --model_path "H:/My Drive/FYP_DATA_jpg_raw/results_mobilenet/best_model.pth" --jpg_root "H:/My Drive/FYP_TEST_JPG" --model_type mobilenet
