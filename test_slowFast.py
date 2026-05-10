@@ -115,26 +115,82 @@ def load_slowfast_model(ckpt_path):
     model = model.to(device).eval()
     print(f"✅ SlowFast Model Loaded from {ckpt_path}")
     return model
-
-# ── Inference and Main ────────────────────────────────────────────────────────
+# ── MAIN INFERENCE & VISUALIZATION ──────────────────────────────────────────
 if __name__ == '__main__':
     ds = SlowFastTestDataset(jpg_root)
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, collate_fn=collate_fn)
-    model = load_slowfast_model(checkpoint)
+    if len(ds) == 0:
+        print("❌ No test samples found! Check your paths.")
+    else:
+        loader = DataLoader(ds, batch_size=batch_size, shuffle=False, 
+                            num_workers=n_workers, collate_fn=collate_fn)
+        model = load_slowfast_model(checkpoint)
 
-    all_preds, all_labels = [], []
-    
-    print("⏳ Testing...")
-    with torch.no_grad():
-        for inputs, labels, _ in loader:
-            inputs = [x.to(device) for x in inputs]
-            outputs = model(inputs)
-            all_preds.extend(outputs.argmax(dim=1).cpu().numpy())
-            all_labels.extend(labels.numpy())
+        all_preds, all_labels, all_probs = [], [], []
+        
+        print("⏳ Running Inference...")
+        with torch.no_grad():
+            for inputs, labels, _ in loader:
+                inputs = [x.to(device) for x in inputs]
+                outputs = model(inputs)
+                probs = torch.softmax(outputs, dim=1)
+                all_probs.extend(probs.cpu().numpy())
+                all_preds.extend(outputs.argmax(dim=1).cpu().numpy())
+                all_labels.extend(labels.numpy())
 
-    acc = (np.array(all_preds) == np.array(all_labels)).mean()
-    print(f"\n🚀 Test Accuracy: {acc*100:.2f}%")
-    
-    if HAS_SK:
-        print("\nClassification Report:")
+        all_preds = np.array(all_preds)
+        all_labels = np.array(all_labels)
+        all_probs = np.array(all_probs)
+
+        # 1. Print Standard Report
+        print("\n" + "="*30)
+        print("TEST RESULTS SUMMARY")
+        print("="*30)
+        report = classification_report(all_labels, all_preds, target_names=CLASSES, output_dict=True)
         print(classification_report(all_labels, all_preds, target_names=CLASSES))
+
+        # 2. Plot Confusion Matrix
+        cm = confusion_matrix(all_labels, all_preds)
+        plt.figure(figsize=(10, 8))
+        plt.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+        plt.title('SlowFast Confusion Matrix')
+        plt.colorbar()
+        tick_marks = np.arange(len(CLASSES))
+        plt.xticks(tick_marks, CLASSES, rotation=45)
+        plt.yticks(tick_marks, CLASSES)
+
+        # Add text annotations to CM
+        thresh = cm.max() / 2.
+        for i, j in np.ndindex(cm.shape):
+            plt.text(j, i, format(cm[i, j], 'd'),
+                     ha="center", va="center",
+                     color="white" if cm[i, j] > thresh else "black")
+
+        plt.ylabel('True Label')
+        plt.xlabel('Predicted Label')
+        plt.tight_layout()
+        plt.savefig(os.path.join(result_path, 'confusion_matrix.png'))
+        print(f"✅ Saved: confusion_matrix.png")
+
+        # 3. Plot Per-Class Accuracy (Bar Chart)
+        accuracies = [report[cls]['precision'] for cls in CLASSES]
+        plt.figure(figsize=(10, 6))
+        plt.bar(CLASSES, accuracies, color='skyblue', edgecolor='navy')
+        plt.axhline(y=np.mean(accuracies), color='red', linestyle='--', label=f'Avg: {np.mean(accuracies):.2f}')
+        plt.title('Per-Class Precision Score')
+        plt.ylabel('Precision')
+        plt.ylim(0, 1.1)
+        plt.legend()
+        plt.savefig(os.path.join(result_path, 'precision_bars.png'))
+        print(f"✅ Saved: precision_bars.png")
+
+        # 4. Save Raw Results to CSV for deep-dive
+        import pandas as pd
+        df = pd.DataFrame({
+            'True': [CLASSES[l] for l in all_labels],
+            'Pred': [CLASSES[p] for p in all_preds],
+            'Correct': all_labels == all_preds
+        })
+        df.to_csv(os.path.join(result_path, 'test_predictions.csv'), index=False)
+        print(f"✅ Saved: test_predictions.csv")
+
+        print(f"\n📊 All visualization files are ready in: {result_path}")
