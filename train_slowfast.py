@@ -17,6 +17,27 @@ Usage:
         --result_path "G:/My Drive/Segmented_FYP_DATA_jpg/results_slowfast"
 """
 
+
+
+
+
+
+# ... [Keep SlowFastDataset and build_model function code the same as your original] ...
+
+# ── Training loop Update ──────────────────────────────────────────────────────
+# [Inside the Main block, update the saving logic]
+# ... 
+    
+# ...
+
+
+
+
+
+
+
+
+
 import os, json, argparse, time
 import numpy as np
 from PIL import Image
@@ -34,29 +55,31 @@ try:
 except ImportError:
     HAS_PTV = False
     print("[WARN] pytorchvideo not found. Install: pip install pytorchvideo")
+  
+
 
 # ── args ──────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument('--jpg_root',    type=str,
-                    default='G:/My Drive/Segmented_FYP_DATA_jpg')
-parser.add_argument('--annotation',  type=str,
-                    default='G:/My Drive/Segmented_FYP_DATA_jpg/dataset.json')
-parser.add_argument('--result_path', type=str,
-                    default='G:/My Drive/Segmented_FYP_DATA_jpg/results_slowfast')
+parser.add_argument('--jpg_root',    type=str, default='/kaggle/working/FYP_DATA_jpg_raw')
+parser.add_argument('--annotation',  type=str, default='/kaggle/working/FYP_DATA_jpg_raw/dataset.json')
+parser.add_argument('--result_path', type=str, default='/kaggle/working/results_slowfast')
 parser.add_argument('--n_epochs',    type=int, default=30)
 parser.add_argument('--batch_size',  type=int, default=8)
 parser.add_argument('--lr',          type=float, default=0.001)
 parser.add_argument('--n_workers',   type=int, default=2)
+# NEW: Added checkpoint argument to fix your error
+parser.add_argument('--checkpoint',  type=int, default=5, help='Save model every N epochs')
 # SlowFast params
-parser.add_argument('--slow_frames', type=int, default=8,
-                    help='Frames for slow pathway (low fps, high spatial)')
-parser.add_argument('--fast_frames', type=int, default=32,
-                    help='Frames for fast pathway (high fps, low spatial)')
-parser.add_argument('--img_size',    type=int, default=112)
+parser.add_argument('--slow_frames', type=int, default=8)
+parser.add_argument('--fast_frames', type=int, default=32)
+parser.add_argument('--img_size',    type=int, default=224)
 parser.add_argument('--resume_path', type=str, default=None)
 args = parser.parse_args()
 
-CLASSES   = ['fight', 'Normal', 'unsafeClimb', 'unsafeJump', 'unsafeThrow']
+
+
+# UPDATED: Classes to match your 5 folders (Removed 'Normal', added 'fall')
+CLASSES   = ['fight', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall']
 C2I       = {c: i for i, c in enumerate(CLASSES)}
 N_CLASSES = len(CLASSES)
 os.makedirs(args.result_path, exist_ok=True)
@@ -293,22 +316,24 @@ if __name__ == '__main__':
         lr = scheduler.get_last_lr()[0]
         elapsed = time.time() - t0
 
+        # Keep your progress prints!
         print(f"\nEpoch {epoch}/{args.n_epochs}  "
               f"Train Loss: {tr_loss:.4f}  Train Acc: {tr_acc*100:.2f}%  |  "
               f"Val Loss: {vl_loss:.4f}  Val Acc: {vl_acc*100:.2f}%  "
               f"[{elapsed:.0f}s]\n")
 
+        # Keep your text logs for plotting later
         save_log(train_log, epoch, tr_loss, tr_acc, lr)
         save_log(val_log,   epoch, vl_loss, vl_acc, lr)
 
-        # save checkpoint every 5 epochs
-        if epoch % 5 == 0:
+        # UPDATED: Dynamic saving frequency based on your command line argument
+        if epoch % args.checkpoint == 0:
             ckpt_path = os.path.join(args.result_path, f'save_{epoch}.pth')
             torch.save({'epoch': epoch, 'state_dict': model.state_dict(),
                         'optimizer': optimizer.state_dict()}, ckpt_path)
             print(f"💾 Checkpoint saved: {ckpt_path}")
 
-        # save best
+        # IMPORTANT: Keep the best model save logic
         if vl_acc > best_val_acc:
             best_val_acc = vl_acc
             best_path = os.path.join(args.result_path, 'best_model.pth')
