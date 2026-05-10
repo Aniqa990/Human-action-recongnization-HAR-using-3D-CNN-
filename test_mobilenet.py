@@ -33,7 +33,7 @@ batch_size  = 8
 n_workers   = 2
 
 # Keep ALL 6 classes to match model training indices exactly
-CLASSES = ['fight', 'Normal', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall']
+CLASSES = ['fight', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall']
 C2I     = {c: i for i, c in enumerate(CLASSES)}
 N_CLS   = len(CLASSES)
 
