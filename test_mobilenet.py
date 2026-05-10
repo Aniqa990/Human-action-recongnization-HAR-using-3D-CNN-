@@ -117,7 +117,7 @@ class DepthwiseSeparable3D(nn.Module):
     def forward(self, x): return self.pw(self.dw(x))
 
 class MobileNet3D(nn.Module):
-    def __init__(self, n_classes=6, width_mult=1.0):
+    def __init__(self, n_classes=5, width_mult=1.0):
         super().__init__()
         def ch(c): return max(1, int(c * width_mult))
         self.features = nn.Sequential(
@@ -150,7 +150,7 @@ class MobileNet3D(nn.Module):
 def load_model(ckpt_path):
     ckpt  = torch.load(ckpt_path, map_location=device)
     state = ckpt.get('state_dict', ckpt)
-    model = MobileNet3D(n_classes=6, width_mult=1.0)
+    model = MobileNet3D(n_classes=5, width_mult=1.0)
     new_state = {k.replace('module.', ''): v for k, v in state.items()}
     model.load_state_dict(new_state, strict=True)
     model = model.to(device)
