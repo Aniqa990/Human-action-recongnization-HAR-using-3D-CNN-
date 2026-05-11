@@ -1,67 +1,43 @@
 """
-step3_train_x3d_v2.py  ─  Improved X3D Training (complete rewrite)
-===================================================================
+step3_train_x3d_v2.py  ─  Improved X3D Training with Resume Support
+====================================================================
 
-ANSWERS TO YOUR QUESTIONS — built into this script:
+RESUME INSTRUCTIONS:
+────────────────────
+Scenario 1: Stopped mid-fold (most common)
+    Check results_x3d_v2/fold_4/ for:
+        last_epoch.pth   ← saved every epoch (overwrites previous)
+        best_model.pth   ← saved only on val acc improvement
 
-Q: Does the script do correct frame sampling?
-   YES. Your clips are 2-6 s at 10 fps = 20-60 frames.
-   Training : random temporal crop window of n_frames.
-              If clip < n_frames, frames are looped/repeated to fill.
-              Each epoch sees a DIFFERENT window of long clips.
-   Validation: deterministic centre-crop, same window every time.
+    Resume command:
+        python step3_train_x3d_v2.py \
+            --jpg_root ... --annotation ... --result_path ... \
+            --resume_from_fold 4 \
+            --resume_checkpoint "results_x3d_v2/fold_4/last_epoch.pth"
 
-Q: Do I re-run prepare_annotation.py?
-   NO. This script reads your dataset.json for labels and paths ONLY.
-   It ignores the existing train/val split and builds its own grouped
-   k-fold from scratch.
+Scenario 2: Fold finished, stopped before next fold started
+        python step3_train_x3d_v2.py \
+            --jpg_root ... --annotation ... --result_path ... \
+            --resume_from_fold 4
 
-Q: Are weights computed correctly?
-   YES, per fold.
-   weight_i = N_train_total / (n_classes * count_i_in_THIS_fold)
-   Then normalised so mean weight = 1.0.
-   Classes with fewer training samples get higher weights.
+Scenario 3: No checkpoint exists for fold 4 (stopped before first save)
+        python step3_train_x3d_v2.py \
+            --jpg_root ... --annotation ... --result_path ... \
+            --resume_from_fold 4
+    (restarts fold 4 from scratch, folds 0-3 results are kept)
 
-Q: Does the script handle class imbalance?
-   YES — three ways:
-     1. Per-fold inverse-frequency class weights in CrossEntropyLoss.
-     2. Label smoothing (reduces overconfidence on dominant classes).
-     3. Random temporal crop means shorter/rarer classes get more
-        diverse training signals per epoch.
+WHAT GETS SAVED EVERY EPOCH (last_epoch.pth):
+    - model state_dict
+    - optimizer state_dict
+    - scheduler state_dict
+    - current epoch number
+    - current phase (phase1 or phase2)
+    - best_val_acc so far in this fold
+    - fold index
+    - all args
 
-Q: Should all layers be trained or just fine-tuned?
-   TWO-PHASE fine-tuning:
-   Phase 1 (first phase1_epochs): backbone FROZEN, only head trained.
-     → Fast convergence, head adapts without corrupting Kinetics features.
-   Phase 2 (remaining epochs): ALL layers unfrozen, low LR.
-     → Backbone slowly adapts to your CCTV domain.
-
-Q: AI video domain gap — is it a problem?
-   YES. HD AI-generated video vs grainy CCTV footage is a real domain
-   gap. This script applies mild quality-degradation augmentation:
-     - Random Gaussian blur (simulates focus/motion blur)
-     - Random small patch erasing (simulates JPEG compression blocks)
-     - Strong colour jitter
-   These make the model domain-invariant so it doesn't memorise
-   "clean = AI video" vs "noisy = CCTV video".
-
-USAGE:
-    # 5-fold grouped CV (recommended)
-    python step3_train_x3d_v2.py \
-        --jpg_root    "H:/My Drive/FYP_DATA_jpg_raw" \
-        --annotation  "H:/My Drive/FYP_DATA_jpg_raw/dataset.json" \
-        --result_path "H:/My Drive/FYP_DATA_jpg_raw/results_x3d_v2" \
-        --n_folds 5 --n_epochs 30 --batch_size 16
-
-    # Kaggle T4
-    python step3_train_x3d_v2.py \
-        --jpg_root    /kaggle/working/FYP_DATA_jpg_raw \
-        --annotation  /kaggle/working/FYP_DATA_jpg_raw/dataset.json \
-        --result_path /kaggle/working/results_x3d_v2 \
-        --n_folds 5 --n_epochs 25 --batch_size 8 --n_workers 2
-
-    # Resume from fold 2 if folds 0 and 1 already finished
-    python step3_train_x3d_v2.py ... --resume_from_fold 2
+This means if training stops at epoch 17 of fold 4, you resume from
+epoch 18 with the exact same optimizer momentum/LR schedule state.
 """
 
 import os, re, json, time, random, argparse
@@ -75,38 +51,44 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchvision.transforms as T
 from sklearn.model_selection import GroupKFold
-import shutil
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 parser = argparse.ArgumentParser()
-parser.add_argument('--jpg_root',         type=str,   required=True)
-parser.add_argument('--annotation',       type=str,   required=True)
-parser.add_argument('--result_path',      type=str,   required=True)
-parser.add_argument('--n_folds',          type=int,   default=5)
-parser.add_argument('--n_epochs',         type=int,   default=30)
-parser.add_argument('--phase1_epochs',    type=int,   default=5,
-                    help='Epochs with backbone frozen (head-only training)')
-parser.add_argument('--batch_size',       type=int,   default=16)
-parser.add_argument('--head_lr',          type=float, default=1e-3)
-parser.add_argument('--full_lr',          type=float, default=1e-4)
-parser.add_argument('--weight_decay',     type=float, default=1e-4)
-parser.add_argument('--label_smoothing',  type=float, default=0.1)
-parser.add_argument('--n_frames',         type=int,   default=16)
-parser.add_argument('--img_size',         type=int,   default=160)
-parser.add_argument('--x3d_variant',      type=str,   default='x3d_s',
+parser.add_argument('--jpg_root',           type=str, required=True)
+parser.add_argument('--annotation',         type=str, default=None,
+                    help='Path to dataset.json. If omitted, scans jpg_root '
+                         'directory structure directly.')
+parser.add_argument('--result_path',        type=str, required=True)
+parser.add_argument('--n_folds',            type=int, default=5)
+parser.add_argument('--n_epochs',           type=int, default=30)
+parser.add_argument('--phase1_epochs',      type=int, default=5)
+parser.add_argument('--batch_size',         type=int, default=16)
+parser.add_argument('--head_lr',            type=float, default=1e-3)
+parser.add_argument('--full_lr',            type=float, default=1e-4)
+parser.add_argument('--weight_decay',       type=float, default=1e-4)
+parser.add_argument('--label_smoothing',    type=float, default=0.1)
+parser.add_argument('--n_frames',           type=int, default=16)
+parser.add_argument('--img_size',           type=int, default=160)
+parser.add_argument('--x3d_variant',        type=str, default='x3d_s',
                     choices=['x3d_xs', 'x3d_s', 'x3d_m'])
-parser.add_argument('--n_workers',        type=int,   default=2)
-parser.add_argument('--seed',             type=int,   default=42)
-parser.add_argument('--resume_from_fold', type=int,   default=0,
-                    help='Skip folds before this index. Default 0 = run all.')
+parser.add_argument('--n_workers',          type=int, default=2)
+parser.add_argument('--seed',               type=int, default=42)
+# ── Resume arguments ──────────────────────────────────────────────────────────
+parser.add_argument('--resume_from_fold',   type=int, default=0,
+                    help='Skip folds with index < this value. '
+                         'Use 4 to start at fold 4.')
+parser.add_argument('--resume_checkpoint',  type=str, default=None,
+                    help='Path to last_epoch.pth to resume mid-fold. '
+                         'Only used for the first fold that runs '
+                         '(i.e. the fold = resume_from_fold).')
 args = parser.parse_args()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Constants & Setup
+# Constants
 # ─────────────────────────────────────────────────────────────────────────────
-CLASSES   = ['fight', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall']
+CLASSES   = ['fight', 'Normal', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall']
 C2I       = {c: i for i, c in enumerate(CLASSES)}
 N_CLASSES = len(CLASSES)
 
@@ -125,71 +107,50 @@ print(f"{'='*65}")
 print(f"  Device        : {device}")
 print(f"  X3D variant   : {args.x3d_variant}")
 print(f"  Total epochs  : {args.n_epochs}  "
-      f"(head-only: {args.phase1_epochs}, "
-      f"full: {args.n_epochs - args.phase1_epochs})")
+      f"(phase1={args.phase1_epochs}, "
+      f"phase2={args.n_epochs - args.phase1_epochs})")
 print(f"  LR head/full  : {args.head_lr} / {args.full_lr}")
 print(f"  Label smooth  : {args.label_smoothing}")
 print(f"  Frames/clip   : {args.n_frames}")
 print(f"  Image size    : {args.img_size}x{args.img_size}")
+if args.resume_from_fold > 0:
+    print(f"  Resuming from : fold {args.resume_from_fold}")
+if args.resume_checkpoint:
+    print(f"  Checkpoint    : {args.resume_checkpoint}")
 print(f"{'='*65}\n")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Source-ID extraction  ← prevents data leakage across augmented variants
+# Source-ID extraction  (prevents data leakage between aug variants)
 # ─────────────────────────────────────────────────────────────────────────────
-# Your augment_videos.py names files:
-#   aug_HorizontalFlip_<original_stem>
-#   aug_Brightness_<original_stem>
-#   aug_GaussianNoise_<original_stem>
-#   aug_TemporalJitter_<original_stem>
-#   aug_Grayscale_<original_stem>
-#   aug_RandomRotate_<original_stem>
-# Originals have no prefix at all.
-#
-# We strip 'aug_<AnyWord>_' prefix to recover the ORIGINAL video stem.
-# GroupKFold then uses this as the group so all augmented variants of
-# the same source video always go into the SAME fold (train OR val,
-# never split between them).
-
 _AUG_RE = re.compile(r'^aug_[A-Za-z]+_(.+)$')
 
 def extract_source_id(stem: str) -> str:
+    """
+    'aug_Brightness_fight_001'  →  'fight_001'
+    'fight_001'                 →  'fight_001'
+    Ensures all augmented copies of the same video share one group key.
+    """
     m = _AUG_RE.match(stem)
-    return m.group(1) if m else stem     # original video: returned unchanged
-
+    return m.group(1) if m else stem
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Frame sampling  ← handles 2-6 second clips correctly
+# Frame sampling
 # ─────────────────────────────────────────────────────────────────────────────
 
-def sample_frames_train(files: list, n: int) -> list:
-    """
-    Random temporal crop for training.
-    - Clip >= n frames : random contiguous window of n frames.
-                         Different random window each epoch → model sees
-                         more of the action over training.
-    - Clip < n frames  : loop/repeat until we have n frames.
-                         This is correct for 2s clips at 10fps (20 frames)
-                         when n_frames=16 — the clip is long enough.
-                         For very short clips (<16 frames) looping is the
-                         standard practice (used by PyTorchVideo itself).
-    """
+def sample_frames_train(files, n):
     total = len(files)
     if total == 0:
         return []
     if total >= n:
         start = random.randint(0, total - n)
         return files[start: start + n]
-    # loop
     repeated = []
     while len(repeated) < n:
         repeated.extend(files)
     return repeated[:n]
 
 
-def sample_frames_val(files: list, n: int) -> list:
-    """
-    Deterministic centre-crop for validation — reproducible every run.
-    """
+def sample_frames_val(files, n):
     total = len(files)
     if total == 0:
         return []
@@ -201,79 +162,84 @@ def sample_frames_val(files: list, n: int) -> list:
         repeated.extend(files)
     return repeated[:n]
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Transforms
 # ─────────────────────────────────────────────────────────────────────────────
 
-def make_train_transform(img_size: int) -> T.Compose:
-    """
-    Spatial augmentation per frame during training.
-    GaussianBlur + RandomErasing simulate CCTV quality on HD AI videos,
-    reducing the domain gap between your two video sources.
-    """
+def make_train_transform(img_size):
     return T.Compose([
         T.Resize((img_size + 24, img_size + 24), antialias=True),
         T.RandomCrop(img_size),
         T.RandomHorizontalFlip(p=0.5),
         T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.1),
         T.RandomGrayscale(p=0.05),
-        # Simulates focus blur / motion blur on HD footage
         T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.3),
         T.ToTensor(),
-        # Simulates JPEG block artefacts (very small patches)
         T.RandomErasing(p=0.2, scale=(0.01, 0.05), ratio=(0.5, 2.0), value=0),
         T.Normalize([0.45, 0.45, 0.45], [0.225, 0.225, 0.225]),
     ])
 
 
-def make_val_transform(img_size: int) -> T.Compose:
+def make_val_transform(img_size):
     return T.Compose([
         T.Resize((img_size, img_size), antialias=True),
         T.ToTensor(),
         T.Normalize([0.45, 0.45, 0.45], [0.225, 0.225, 0.225]),
     ])
 
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Dataset — used in two ways:
-#   1. Master scan (all videos, no transform) → extract groups/labels for kfold
-#   2. FoldSubset (per-fold, correct transform) → actual training/val loading
+# Sample discovery  (annotation file OR directory scan)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def scan_all_samples(jpg_root: str, annotation_path: str) -> list:
+def scan_all_samples(jpg_root, annotation_path=None):
     """
-    Returns list of (folder_path, label_idx, video_stem, source_id)
-    for every video found in the annotation, regardless of subset.
-    Does NOT load any frames — just collects metadata.
+    Returns list of (folder_path, label_idx, video_stem, source_id).
+    If annotation_path given: reads labels from JSON (subset field ignored).
+    If None: discovers classes directly from jpg_root/ClassName/ structure.
     """
-    with open(annotation_path, 'r') as f:
-        ann = json.load(f)
-
     samples = []
-    for vid_stem, info in ann['database'].items():
-        label_name = info['annotations']['label']
-        label_idx  = C2I.get(label_name, -1)
-        if label_idx < 0:
-            continue
-        for cand in [
-            os.path.join(jpg_root, label_name, vid_stem),
-            os.path.join(jpg_root, vid_stem),
-        ]:
-            if os.path.isdir(cand):
-                src_id = extract_source_id(vid_stem)
-                samples.append((cand, label_idx, vid_stem, src_id))
-                break
+
+    if annotation_path and os.path.exists(annotation_path):
+        with open(annotation_path, 'r') as f:
+            ann = json.load(f)
+        for vid_stem, info in ann['database'].items():
+            label_name = info['annotations']['label']
+            label_idx  = C2I.get(label_name, -1)
+            if label_idx < 0:
+                continue
+            for cand in [
+                os.path.join(jpg_root, label_name, vid_stem),
+                os.path.join(jpg_root, vid_stem),
+            ]:
+                if os.path.isdir(cand):
+                    samples.append((cand, label_idx, vid_stem,
+                                    extract_source_id(vid_stem)))
+                    break
+    else:
+        print("  [INFO] No annotation file — scanning directory structure.")
+        for class_name in CLASSES:
+            class_dir = os.path.join(jpg_root, class_name)
+            if not os.path.isdir(class_dir):
+                print(f"  [WARN] Not found: {class_dir}")
+                continue
+            for vid_stem in os.listdir(class_dir):
+                folder = os.path.join(class_dir, vid_stem)
+                if not os.path.isdir(folder):
+                    continue
+                jpgs = [f for f in os.listdir(folder) if f.endswith('.jpg')]
+                if not jpgs:
+                    continue
+                samples.append((folder, C2I[class_name], vid_stem,
+                                 extract_source_id(vid_stem)))
 
     return samples
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Dataset
+# ─────────────────────────────────────────────────────────────────────────────
 
 class FoldDataset(Dataset):
-    """
-    Dataset for one fold (train or val subset).
-    Applies the correct transform (train augmentation vs val centre-crop).
-    """
-    def __init__(self, sample_list: list, is_train: bool):
+    def __init__(self, sample_list, is_train):
         self.samples   = sample_list
         self.is_train  = is_train
         self.transform = (make_train_transform(args.img_size) if is_train
@@ -284,160 +250,161 @@ class FoldDataset(Dataset):
 
     def __getitem__(self, idx):
         folder, label, _, _ = self.samples[idx]
-
-        files = sorted(
-            f for f in os.listdir(folder) if f.lower().endswith('.jpg')
-        )
+        files    = sorted(f for f in os.listdir(folder)
+                          if f.lower().endswith('.jpg'))
         selected = (sample_frames_train(files, args.n_frames) if self.is_train
                     else sample_frames_val(files, args.n_frames))
-
         if not selected:
-            # Empty folder — black clip
-            return torch.zeros(3, args.n_frames, args.img_size, args.img_size), label
-
+            return torch.zeros(3, args.n_frames,
+                               args.img_size, args.img_size), label
         frames = []
         for fname in selected:
             try:
                 img = Image.open(os.path.join(folder, fname)).convert('RGB')
             except Exception:
-                img = Image.new('RGB', (args.img_size, args.img_size), (0, 0, 0))
+                img = Image.new('RGB', (args.img_size, args.img_size), (0,0,0))
             frames.append(self.transform(img))
-
-        # [T, 3, H, W] → [3, T, H, W]
-        clip = torch.stack(frames, dim=0).permute(1, 0, 2, 3)
-        return clip, label
-
+        return torch.stack(frames, 0).permute(1, 0, 2, 3), label
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Model
 # ─────────────────────────────────────────────────────────────────────────────
 
-def build_x3d(variant: str):
-    """
-    Load X3D pretrained on Kinetics-400.  Replace head with n_classes output.
-    Returns (model, arch_type) where arch_type is 'x3d' or 'r3d18'.
-    """
+def build_x3d(variant):
     try:
-        model = torch.hub.load(
-            'facebookresearch/pytorchvideo', variant,
-            pretrained=True, verbose=False,
-        )
+        model = torch.hub.load('facebookresearch/pytorchvideo', variant,
+                               pretrained=True, verbose=False)
         in_feat = model.blocks[-1].proj.in_features
         model.blocks[-1].proj = nn.Linear(in_feat, N_CLASSES)
-        print(f"  ✅ {variant.upper()} loaded — pretrained Kinetics-400 "
-              f"({sum(p.numel() for p in model.parameters())/1e6:.1f}M params)")
+        total_p = sum(p.numel() for p in model.parameters()) / 1e6
+        print(f"  ✅ {variant.upper()} loaded — Kinetics-400 ({total_p:.1f}M params)")
         return model, 'x3d'
     except Exception as e:
-        print(f"  [WARN] pytorchvideo hub failed: {e}")
-        print(f"         Falling back to R3D-18")
+        print(f"  [WARN] pytorchvideo failed: {e}  → using R3D-18 fallback")
         from torchvision.models.video import r3d_18, R3D_18_Weights
         model = r3d_18(weights=R3D_18_Weights.DEFAULT)
         model.fc = nn.Linear(model.fc.in_features, N_CLASSES)
-        print(f"  ✅ R3D-18 fallback loaded — pretrained Kinetics-400")
         return model, 'r3d18'
 
 
-def freeze_backbone(model: nn.Module, arch: str):
-    """Freeze all params; then unfreeze only the classification head."""
+def freeze_backbone(model, arch):
     for p in model.parameters():
         p.requires_grad = False
-    if arch == 'x3d':
-        for p in model.blocks[-1].proj.parameters():
-            p.requires_grad = True
-    else:
-        for p in model.fc.parameters():
-            p.requires_grad = True
-
-
-def unfreeze_all(model: nn.Module):
-    for p in model.parameters():
+    head_params = (model.blocks[-1].proj.parameters() if arch == 'x3d'
+                   else model.fc.parameters())
+    for p in head_params:
         p.requires_grad = True
 
 
+def unfreeze_all(model):
+    for p in model.parameters():
+        p.requires_grad = True
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Class weights  (per-fold, inverse-frequency)
+# Class weights
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_class_weights(train_labels: list) -> torch.Tensor:
-    """
-    Inverse-frequency weighting normalised to mean = 1.0.
-
-    weight_i = N_total / (N_classes * count_i)
-
-    Effect: if 'fight' has 400 train samples and 'unsafeThrow' has 200,
-    unsafeThrow gets 2× the weight, so its misclassification costs more.
-    This directly addresses class imbalance without oversampling.
-    """
-    counts  = Counter(train_labels)
-    total   = sum(counts.values())
+def compute_class_weights(train_labels):
+    counts = Counter(train_labels)
+    total  = sum(counts.values())
     w = torch.tensor(
         [total / (N_CLASSES * max(1, counts[i])) for i in range(N_CLASSES)],
-        dtype=torch.float32,
-    )
-    return w / w.mean()   # normalise: mean weight = 1.0 (keeps loss scale stable)
-
+        dtype=torch.float32)
+    return w / w.mean()
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Training epoch / validation epoch
+# Epoch runner
 # ─────────────────────────────────────────────────────────────────────────────
 
-def run_epoch(model, loader, optimizer, criterion, is_train: bool):
+def run_epoch(model, loader, optimizer, criterion, is_train):
     model.train() if is_train else model.eval()
-
-    total_loss  = 0.0
-    correct     = 0
-    total       = 0
-    cls_correct = [0] * N_CLASSES
-    cls_total   = [0] * N_CLASSES
+    total_loss = 0.0
+    correct = 0
+    total   = 0
+    cls_c   = [0] * N_CLASSES
+    cls_t   = [0] * N_CLASSES
 
     ctx = torch.enable_grad() if is_train else torch.no_grad()
     with ctx:
         for clips, labels in loader:
             clips  = clips.to(device, non_blocking=True)
             labels = labels.to(device, non_blocking=True)
-
             if is_train:
                 optimizer.zero_grad()
-
             out  = model(clips)
             loss = criterion(out, labels)
-
             if is_train:
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.parameters(), 5.0)
                 optimizer.step()
-
-            preds      = out.argmax(dim=1)
+            preds      = out.argmax(1)
             correct   += (preds == labels).sum().item()
             total     += labels.size(0)
             total_loss += loss.item()
-
-            for lbl, pred in zip(labels.cpu().tolist(), preds.cpu().tolist()):
-                cls_total[lbl]   += 1
-                cls_correct[lbl] += int(lbl == pred)
+            for l, p in zip(labels.cpu().tolist(), preds.cpu().tolist()):
+                cls_t[l] += 1
+                cls_c[l] += int(l == p)
 
     acc     = correct / max(1, total)
     avg_los = total_loss / max(1, len(loader))
-    per_cls = {CLASSES[i]: (cls_correct[i], cls_total[i])
-               for i in range(N_CLASSES)}
+    per_cls = {CLASSES[i]: (cls_c[i], cls_t[i]) for i in range(N_CLASSES)}
     return avg_los, acc, per_cls
 
 
-def print_per_class(per_cls: dict):
+def print_per_class(per_cls):
     for cls, (c, t) in per_cls.items():
         pct = 100.0 * c / max(1, t)
         mk  = '✅' if pct >= 70 else ('⚠️ ' if pct >= 50 else '❌')
         print(f"      {mk} {cls:15s}: {c:3d}/{t:3d}  ({pct:5.1f}%)")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Checkpoint helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def save_last_epoch(path, model, opt, sch, epoch, phase,
+                    fold_idx, best_val_acc, log_rows):
+    """
+    Saves everything needed to resume mid-fold from the NEXT epoch.
+    Overwrites the same file every epoch so disk usage stays small.
+    """
+    torch.save({
+        'epoch':        epoch,
+        'phase':        phase,            # 'phase1' or 'phase2'
+        'fold':         fold_idx,
+        'state_dict':   model.state_dict(),
+        'optimizer':    opt.state_dict(),
+        'scheduler':    sch.state_dict(),
+        'best_val_acc': best_val_acc,
+        'log_rows':     log_rows,
+        'classes':      CLASSES,
+        'args':         vars(args),
+    }, path)
+
+
+def save_best_model(path, model, epoch, fold_idx, val_acc):
+    torch.save({
+        'epoch':      epoch,
+        'fold':       fold_idx,
+        'state_dict': model.state_dict(),
+        'val_acc':    val_acc,
+        'classes':    CLASSES,
+        'args':       vars(args),
+    }, path)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# One fold
+# Single fold training  (with mid-fold resume)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def train_fold(fold_idx: int, train_indices: list,
-               val_indices: list, all_samples: list) -> float:
-
-    fold_dir = os.path.join(args.result_path, f'fold_{fold_idx}')
+def train_fold(fold_idx, train_indices, val_indices, all_samples,
+               resume_ckpt_path=None):
+    """
+    resume_ckpt_path: path to last_epoch.pth if resuming mid-fold.
+                      Pass None to start fold from scratch.
+    """
+    fold_dir      = os.path.join(args.result_path, f'fold_{fold_idx}')
+    last_ep_path  = os.path.join(fold_dir, 'last_epoch.pth')
+    best_mod_path = os.path.join(fold_dir, 'best_model.pth')
+    log_csv_path  = os.path.join(fold_dir, 'log.csv')
     os.makedirs(fold_dir, exist_ok=True)
 
     # ── Leakage check ─────────────────────────────────────────────────────────
@@ -445,112 +412,173 @@ def train_fold(fold_idx: int, train_indices: list,
     val_srcs   = {all_samples[i][3] for i in val_indices}
     overlap    = train_srcs & val_srcs
     if overlap:
-        print(f"\n  ⚠️  LEAKAGE: {len(overlap)} source IDs appear in BOTH "
-              f"train and val! Examples: {list(overlap)[:3]}")
-        print(f"      Check extract_source_id() against your file naming.")
+        print(f"\n  ⚠️  LEAKAGE: {len(overlap)} source IDs in both train & val!")
+        print(f"      Examples: {list(overlap)[:3]}")
     else:
         print(f"  ✅ No leakage — {len(train_srcs)} train sources, "
-              f"{len(val_srcs)} val sources, 0 overlap")
+              f"{len(val_srcs)} val sources")
 
     # ── Class balance ─────────────────────────────────────────────────────────
     train_labels = [all_samples[i][1] for i in train_indices]
     val_labels   = [all_samples[i][1] for i in val_indices]
-    tr_counts    = Counter(train_labels)
-    vl_counts    = Counter(val_labels)
+    tr_c = Counter(train_labels)
+    vl_c = Counter(val_labels)
     print(f"  Train: {len(train_indices)} | Val: {len(val_indices)}")
-    print(f"  {'Class':15s}  {'Train':>6s}  {'Val':>5s}")
+    print(f"  {'Class':15s}  {'Train':>6}  {'Val':>5}")
     for i, cls in enumerate(CLASSES):
-        print(f"  {cls:15s}  {tr_counts.get(i,0):6d}  {vl_counts.get(i,0):5d}")
+        print(f"  {cls:15s}  {tr_c.get(i,0):6d}  {vl_c.get(i,0):5d}")
 
     # ── Dataloaders ───────────────────────────────────────────────────────────
-    train_ds = FoldDataset([all_samples[i] for i in train_indices], is_train=True)
-    val_ds   = FoldDataset([all_samples[i] for i in val_indices],   is_train=False)
-
     kw = dict(num_workers=args.n_workers, pin_memory=True,
               persistent_workers=(args.n_workers > 0))
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size,
-                              shuffle=True,  **kw)
-    val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
-                              shuffle=False, **kw)
+    train_loader = DataLoader(
+        FoldDataset([all_samples[i] for i in train_indices], True),
+        batch_size=args.batch_size, shuffle=True, **kw)
+    val_loader = DataLoader(
+        FoldDataset([all_samples[i] for i in val_indices], False),
+        batch_size=args.batch_size, shuffle=False, **kw)
 
     # ── Model ─────────────────────────────────────────────────────────────────
     print(f"\n  Building {args.x3d_variant}...")
     model, arch = build_x3d(args.x3d_variant)
     model = model.to(device)
 
-    # ── Per-fold class weights ─────────────────────────────────────────────────
-    weights = compute_class_weights(train_labels).to(device)
-    print(f"  Per-fold class weights:")
+    # ── Loss ──────────────────────────────────────────────────────────────────
+    weights   = compute_class_weights(train_labels).to(device)
+    print(f"  Class weights:")
     for i, cls in enumerate(CLASSES):
         print(f"      {cls:15s}: {weights[i].item():.3f}")
-
     criterion = nn.CrossEntropyLoss(weight=weights,
                                     label_smoothing=args.label_smoothing)
 
-    best_val_acc = 0.0
-    log_rows     = []
+    # ── Decide where to start ─────────────────────────────────────────────────
+    # If a resume checkpoint is provided, load it and figure out which
+    # epoch/phase we left off at.  Otherwise start from epoch 1 phase1.
+    resume_epoch    = 0       # last completed epoch (0 = none)
+    resume_phase    = None    # 'phase1' or 'phase2'
+    best_val_acc    = 0.0
+    log_rows        = []
+    loaded_opt_state = None
+    loaded_sch_state = None
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # PHASE 1: backbone FROZEN, head only
-    # ──────────────────────────────────────────────────────────────────────────
-    freeze_backbone(model, arch)
-    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"\n  ── Phase 1: head-only / backbone frozen ──")
-    print(f"     Trainable params: {n_trainable:,}")
-
-    opt1 = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()),
-        lr=args.head_lr, weight_decay=args.weight_decay,
+    ckpt_to_load = resume_ckpt_path or (
+        last_ep_path if os.path.exists(last_ep_path) else None
     )
-    sch1 = CosineAnnealingLR(opt1, T_max=args.phase1_epochs,
-                              eta_min=args.head_lr * 0.01)
 
-    for ep in range(1, args.phase1_epochs + 1):
-        t0 = time.time()
-        tl, ta, _      = run_epoch(model, train_loader, opt1, criterion, True)
-        vl, va, vl_cls = run_epoch(model, val_loader,   opt1, criterion, False)
-        sch1.step()
-        lr  = opt1.param_groups[0]['lr']
-        print(f"  P1 [{ep:2d}/{args.phase1_epochs}] "
-              f"Tr {tl:.4f}/{ta*100:.1f}%  Val {vl:.4f}/{va*100:.1f}%  "
-              f"LR {lr:.2e}  {time.time()-t0:.0f}s")
-        log_rows.append((ep, 'phase1', tl, ta, vl, va, lr))
-        if va > best_val_acc:
-            best_val_acc = va
-            _save_ckpt(model, fold_dir, ep, fold_idx, va)
+    if ckpt_to_load and os.path.exists(ckpt_to_load):
+        print(f"\n  Loading checkpoint: {ckpt_to_load}")
+        ckpt = torch.load(ckpt_to_load, map_location=device)
+        model.load_state_dict(ckpt['state_dict'])
+        resume_epoch     = ckpt['epoch']           # last COMPLETED epoch
+        resume_phase     = ckpt['phase']
+        best_val_acc     = ckpt.get('best_val_acc', 0.0)
+        log_rows         = ckpt.get('log_rows', [])
+        loaded_opt_state = ckpt['optimizer']
+        loaded_sch_state = ckpt['scheduler']
+        print(f"  Resumed — last completed epoch: {resume_epoch} "
+              f"({resume_phase}), best val acc so far: "
+              f"{best_val_acc*100:.2f}%")
+    else:
+        print(f"\n  Starting fold {fold_idx} from scratch.")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # PHASE 2: all layers, low LR
-    # ──────────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 1 — head only, backbone frozen
+    # Runs epochs 1 .. phase1_epochs
+    # Skip entirely if we already finished phase1 (resume_phase == 'phase2'
+    # or resume_epoch >= phase1_epochs)
+    # ─────────────────────────────────────────────────────────────────────────
+    phase1_done = (resume_epoch >= args.phase1_epochs)
+
+    if not phase1_done:
+        freeze_backbone(model, arch)
+        n_tr = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"\n  ── Phase 1: head-only ({args.phase1_epochs} epochs, "
+              f"{n_tr:,} trainable params) ──")
+
+        opt1 = torch.optim.AdamW(
+            filter(lambda p: p.requires_grad, model.parameters()),
+            lr=args.head_lr, weight_decay=args.weight_decay)
+        sch1 = CosineAnnealingLR(opt1, T_max=args.phase1_epochs,
+                                 eta_min=args.head_lr * 0.01)
+
+        # Restore optimizer/scheduler state if we're mid-phase1
+        if loaded_opt_state and resume_phase == 'phase1':
+            opt1.load_state_dict(loaded_opt_state)
+            sch1.load_state_dict(loaded_sch_state)
+            print(f"  Restored phase1 optimizer & scheduler state.")
+
+        start_ep = resume_epoch + 1
+        for ep in range(start_ep, args.phase1_epochs + 1):
+            t0 = time.time()
+            tl, ta, _      = run_epoch(model, train_loader, opt1, criterion, True)
+            vl, va, vl_cls = run_epoch(model, val_loader,   opt1, criterion, False)
+            sch1.step()
+            lr = opt1.param_groups[0]['lr']
+            print(f"  P1 [{ep:2d}/{args.phase1_epochs}] "
+                  f"Tr {tl:.4f}/{ta*100:.1f}%  "
+                  f"Val {vl:.4f}/{va*100:.1f}%  "
+                  f"LR {lr:.2e}  {time.time()-t0:.0f}s")
+            log_rows.append((ep, 'phase1', tl, ta, vl, va, lr))
+
+            if va > best_val_acc:
+                best_val_acc = va
+                save_best_model(best_mod_path, model, ep, fold_idx, va)
+
+            # Save last-epoch checkpoint after every epoch
+            save_last_epoch(last_ep_path, model, opt1, sch1,
+                            ep, 'phase1', fold_idx, best_val_acc, log_rows)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PHASE 2 — all layers, low LR
+    # Runs epochs phase1_epochs+1 .. n_epochs
+    # ─────────────────────────────────────────────────────────────────────────
     unfreeze_all(model)
-    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    phase2_n    = args.n_epochs - args.phase1_epochs
-    print(f"\n  ── Phase 2: full fine-tuning ({phase2_n} epochs) ──")
-    print(f"     Trainable params: {n_trainable:,}")
+    phase2_n = args.n_epochs - args.phase1_epochs
+    n_tr     = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"\n  ── Phase 2: full fine-tuning ({phase2_n} epochs, "
+          f"{n_tr:,} trainable params) ──")
 
     opt2 = torch.optim.AdamW(model.parameters(), lr=args.full_lr,
-                              weight_decay=args.weight_decay)
+                             weight_decay=args.weight_decay)
     sch2 = CosineAnnealingLR(opt2, T_max=phase2_n,
-                              eta_min=args.full_lr * 0.01)
+                             eta_min=args.full_lr * 0.01)
 
-    for ep in range(args.phase1_epochs + 1, args.n_epochs + 1):
+    # Restore optimizer/scheduler if we're resuming mid-phase2
+    if loaded_opt_state and resume_phase == 'phase2':
+        opt2.load_state_dict(loaded_opt_state)
+        sch2.load_state_dict(loaded_sch_state)
+        print(f"  Restored phase2 optimizer & scheduler state.")
+
+    # Figure out the first epoch of phase2 we still need to run
+    if resume_phase == 'phase2':
+        start_ep = resume_epoch + 1
+    else:
+        start_ep = args.phase1_epochs + 1
+
+    for ep in range(start_ep, args.n_epochs + 1):
         t0 = time.time()
         tl, ta, _      = run_epoch(model, train_loader, opt2, criterion, True)
         vl, va, vl_cls = run_epoch(model, val_loader,   opt2, criterion, False)
         sch2.step()
         lr = opt2.param_groups[0]['lr']
         print(f"  P2 [{ep:2d}/{args.n_epochs}] "
-              f"Tr {tl:.4f}/{ta*100:.1f}%  Val {vl:.4f}/{va*100:.1f}%  "
+              f"Tr {tl:.4f}/{ta*100:.1f}%  "
+              f"Val {vl:.4f}/{va*100:.1f}%  "
               f"LR {lr:.2e}  {time.time()-t0:.0f}s")
         print_per_class(vl_cls)
         log_rows.append((ep, 'phase2', tl, ta, vl, va, lr))
+
         if va > best_val_acc:
             best_val_acc = va
-            _save_ckpt(model, fold_dir, ep, fold_idx, va)
+            save_best_model(best_mod_path, model, ep, fold_idx, va)
             print(f"  🏆 Best: {va*100:.2f}% → fold_{fold_idx}/best_model.pth")
 
-    # ── Save log ──────────────────────────────────────────────────────────────
-    with open(os.path.join(fold_dir, 'log.csv'), 'w') as f:
+        # Save last-epoch checkpoint after every epoch
+        save_last_epoch(last_ep_path, model, opt2, sch2,
+                        ep, 'phase2', fold_idx, best_val_acc, log_rows)
+
+    # ── Save training log ─────────────────────────────────────────────────────
+    with open(log_csv_path, 'w') as f:
         f.write("epoch,phase,tr_loss,tr_acc,vl_loss,vl_acc,lr\n")
         for row in log_rows:
             f.write(",".join(
@@ -560,84 +588,65 @@ def train_fold(fold_idx: int, train_indices: list,
     print(f"\n  Fold {fold_idx} done — best val acc: {best_val_acc*100:.2f}%")
     return best_val_acc
 
-
-def _save_ckpt(model, fold_dir, epoch, fold_idx, val_acc):
-    torch.save({
-        'epoch':      epoch,
-        'fold':       fold_idx,
-        'state_dict': model.state_dict(),
-        'val_acc':    val_acc,
-        'classes':    CLASSES,
-        'args':       vars(args),
-    }, os.path.join(fold_dir, 'best_model.pth'))
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
 
-    print("Scanning all videos (ignoring existing train/val split)...")
+    print("Scanning dataset...")
     all_samples = scan_all_samples(args.jpg_root, args.annotation)
 
     if not all_samples:
-        print("❌ No samples found. Check --jpg_root and --annotation.")
+        print("No samples found. Check --jpg_root and --annotation.")
         exit(1)
 
-    groups     = np.array([s[3] for s in all_samples])   # source_id per video
-    labels_arr = np.array([s[1] for s in all_samples])
-    indices    = np.arange(len(all_samples))
+    groups    = np.array([s[3] for s in all_samples])
+    labels    = np.array([s[1] for s in all_samples])
+    indices   = np.arange(len(all_samples))
+    uniq_src  = len(set(groups.tolist()))
 
-    # Summary
-    unique_src = len(set(groups.tolist()))
-    counts     = Counter(labels_arr.tolist())
     print(f"\n  Total video folders : {len(all_samples)}")
-    print(f"  Unique source videos: {unique_src}")
-    print(f"  Avg aug factor      : {len(all_samples)/unique_src:.1f}x per source")
-    print(f"\n  Per-class totals:")
+    print(f"  Unique source videos: {uniq_src}")
+    print(f"  Avg aug factor      : {len(all_samples)/uniq_src:.1f}x")
+    counts = Counter(labels.tolist())
     for i, cls in enumerate(CLASSES):
-        print(f"      {cls:15s}: {counts.get(i, 0):4d} folders")
-    print()
+        print(f"  {cls:15s}: {counts.get(i,0):4d}")
 
-    # Warn if any 'aug_' stem couldn't be stripped
-    bad = [s[2] for s in all_samples
-           if s[2].startswith('aug_') and extract_source_id(s[2]) == s[2]]
-    if bad:
-        print(f"  ⚠️  {len(bad)} aug_ videos not stripped correctly. "
-              f"Examples: {bad[:3]}")
-        print(f"     These will be treated as independent sources — fix naming.")
-
-    # GroupKFold: all augmentations of one source → same fold guaranteed
     gkf    = GroupKFold(n_splits=args.n_folds)
-    splits = list(gkf.split(indices, labels_arr, groups))
+    splits = list(gkf.split(indices, labels, groups))
 
     fold_results = []
+
     for fold_i, (tr_idx, vl_idx) in enumerate(splits):
 
         if fold_i < args.resume_from_fold:
-            print(f"[Skip fold {fold_i}]")
+            # Try to recover the best acc from already-saved checkpoint
+            best_path = os.path.join(args.result_path,
+                                     f'fold_{fold_i}', 'best_model.pth')
+            if os.path.exists(best_path):
+                ckpt = torch.load(best_path, map_location='cpu')
+                saved_acc = ckpt.get('val_acc', 0.0)
+                fold_results.append(saved_acc)
+                print(f"[Skip fold {fold_i} — loaded saved acc "
+                      f"{saved_acc*100:.2f}%]")
+            else:
+                print(f"[Skip fold {fold_i} — no saved checkpoint found]")
             continue
 
         print(f"\n{'─'*65}")
         print(f"  FOLD {fold_i + 1} / {args.n_folds}")
         print(f"{'─'*65}")
 
-        acc = train_fold(fold_i, tr_idx.tolist(), vl_idx.tolist(), all_samples)
+        # Pass the resume checkpoint only for the FIRST fold we actually run
+        ckpt_path = (args.resume_checkpoint
+                     if fold_i == args.resume_from_fold
+                     else None)
+
+        acc = train_fold(fold_i, tr_idx.tolist(), vl_idx.tolist(),
+                         all_samples, resume_ckpt_path=ckpt_path)
         fold_results.append(acc)
 
-   # --- NEW ZIP LOGIC ---
-        print(f"\n  [INFO] Zipping results after Fold {fold_i}...")
-        try:
-            # This creates 'results_backup.zip' in /kaggle/working/
-            # It overwrites the zip every fold so you always have the latest progress
-            shutil.make_archive('/kaggle/working/results_backup', 'zip', args.result_path)
-            print(f"  ✅ Zip updated: /kaggle/working/results_backup.zip")
-        except Exception as e:
-            print(f"  ❌ Failed to zip: {e}")
-        # ---------------------
-
-    # Summary
     print(f"\n{'='*65}")
     print(f"  K-FOLD SUMMARY")
     print(f"{'='*65}")
@@ -656,4 +665,3 @@ if __name__ == '__main__':
             'std_val_acc':  std_acc,
             'args':         vars(args),
         }, f, indent=2)
-    print("Saved cv_summary.json")
