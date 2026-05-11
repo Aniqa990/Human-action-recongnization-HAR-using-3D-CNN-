@@ -88,7 +88,7 @@ args = parser.parse_args()
 # ─────────────────────────────────────────────────────────────────────────────
 # Constants
 # ─────────────────────────────────────────────────────────────────────────────
-CLASSES   = ['fight', 'Normal', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall']
+CLASSES   = ['fight', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall']
 C2I       = {c: i for i, c in enumerate(CLASSES)}
 N_CLASSES = len(CLASSES)
 
