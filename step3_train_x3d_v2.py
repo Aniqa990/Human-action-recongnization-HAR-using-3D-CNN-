@@ -300,7 +300,7 @@ class FoldDataset(Dataset):
                 img = Image.open(os.path.join(folder, fname)).convert('RGB')
             except Exception:
                 img = Image.new('RGB', (args.img_size, args.img_size), (0, 0, 0))
-            frames.append(self.transform(img))
+            #frames.append(self.transform(img))
 
         # [T, 3, H, W] → [3, T, H, W]
         clip = torch.stack(frames, dim=0).permute(1, 0, 2, 3)
