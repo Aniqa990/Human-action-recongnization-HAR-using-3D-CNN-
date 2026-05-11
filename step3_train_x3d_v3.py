@@ -75,6 +75,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import torchvision.transforms as T
 from sklearn.model_selection import GroupKFold
+import shutil
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
@@ -624,6 +625,17 @@ if __name__ == '__main__':
 
         acc = train_fold(fold_i, tr_idx.tolist(), vl_idx.tolist(), all_samples)
         fold_results.append(acc)
+
+   # --- NEW ZIP LOGIC ---
+        print(f"\n  [INFO] Zipping results after Fold {fold_i}...")
+        try:
+            # This creates 'results_backup.zip' in /kaggle/working/
+            # It overwrites the zip every fold so you always have the latest progress
+            shutil.make_archive('/kaggle/working/results_backup', 'zip', args.result_path)
+            print(f"  ✅ Zip updated: /kaggle/working/results_backup.zip")
+        except Exception as e:
+            print(f"  ❌ Failed to zip: {e}")
+        # ---------------------
 
     # Summary
     print(f"\n{'='*65}")
