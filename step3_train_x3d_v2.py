@@ -205,33 +205,33 @@ def sample_frames_val(files: list, n: int) -> list:
 # Transforms
 # ─────────────────────────────────────────────────────────────────────────────
 
-# def make_train_transform(img_size: int) -> T.Compose:
-#     """
-#     Spatial augmentation per frame during training.
-#     GaussianBlur + RandomErasing simulate CCTV quality on HD AI videos,
-#     reducing the domain gap between your two video sources.
-#     """
-#     return T.Compose([
-#         T.Resize((img_size + 24, img_size + 24), antialias=True),
-#         T.RandomCrop(img_size),
-#         T.RandomHorizontalFlip(p=0.5),
-#         T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.1),
-#         T.RandomGrayscale(p=0.05),
-#         # Simulates focus blur / motion blur on HD footage
-#         T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.3),
-#         T.ToTensor(),
-#         # Simulates JPEG block artefacts (very small patches)
-#         T.RandomErasing(p=0.2, scale=(0.01, 0.05), ratio=(0.5, 2.0), value=0),
-#         T.Normalize([0.45, 0.45, 0.45], [0.225, 0.225, 0.225]),
-#     ])
+def make_train_transform(img_size: int) -> T.Compose:
+    """
+    Spatial augmentation per frame during training.
+    GaussianBlur + RandomErasing simulate CCTV quality on HD AI videos,
+    reducing the domain gap between your two video sources.
+    """
+    return T.Compose([
+        T.Resize((img_size + 24, img_size + 24), antialias=True),
+        T.RandomCrop(img_size),
+        T.RandomHorizontalFlip(p=0.5),
+        T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.3, hue=0.1),
+        T.RandomGrayscale(p=0.05),
+        # Simulates focus blur / motion blur on HD footage
+        T.RandomApply([T.GaussianBlur(kernel_size=3, sigma=(0.1, 1.5))], p=0.3),
+        T.ToTensor(),
+        # Simulates JPEG block artefacts (very small patches)
+        T.RandomErasing(p=0.2, scale=(0.01, 0.05), ratio=(0.5, 2.0), value=0),
+        T.Normalize([0.45, 0.45, 0.45], [0.225, 0.225, 0.225]),
+    ])
 
 
-# def make_val_transform(img_size: int) -> T.Compose:
-#     return T.Compose([
-#         T.Resize((img_size, img_size), antialias=True),
-#         T.ToTensor(),
-#         T.Normalize([0.45, 0.45, 0.45], [0.225, 0.225, 0.225]),
-#     ])
+def make_val_transform(img_size: int) -> T.Compose:
+    return T.Compose([
+        T.Resize((img_size, img_size), antialias=True),
+        T.ToTensor(),
+        T.Normalize([0.45, 0.45, 0.45], [0.225, 0.225, 0.225]),
+    ])
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -300,7 +300,7 @@ class FoldDataset(Dataset):
                 img = Image.open(os.path.join(folder, fname)).convert('RGB')
             except Exception:
                 img = Image.new('RGB', (args.img_size, args.img_size), (0, 0, 0))
-            #frames.append(self.transform(img))
+            frames.append(self.transform(img))
 
         # [T, 3, H, W] → [3, T, H, W]
         clip = torch.stack(frames, dim=0).permute(1, 0, 2, 3)
