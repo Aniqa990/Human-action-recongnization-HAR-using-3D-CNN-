@@ -117,7 +117,7 @@ def get_args():
     p.add_argument('--annotation', type=str, default='/kaggle/working/FYP_DATA_jpg_raw/dataset.json')
     p.add_argument('--result_path', type=str, default='/kaggle/working/results_slowfast_ft')
     p.add_argument('--classes', type=str,
-                    default='fight,unsafeClimb,unsafeJump,unsafeThrow,fall',
+                    default='fight,unsafeClimb,unsafeThrow,fall',
                     help="Comma-separated class names. MUST match your folder names exactly. "
                          "Edit this if your actual class set differs (e.g. no unsafeJump, "
                          "or you want to include Normal).")
