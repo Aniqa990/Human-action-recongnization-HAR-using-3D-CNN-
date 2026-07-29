@@ -637,7 +637,7 @@ def main():
     # ── Resume ────────────────────────────────────────────────────────────
     if args.resume and Path(args.resume).exists():
         print(f"[info] Resuming from {args.resume}")
-        ckpt = torch.load(args.resume, map_location=device)
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt['model_state'])
         history = ckpt.get('history', [])
         best_metric = ckpt.get('best_metric', -1.0)
@@ -738,7 +738,7 @@ def main():
 
     # ── Final evaluation with best checkpoint ────────────────────────────
     print("\n=== Loading best checkpoint for final evaluation/reporting ===")
-    best_ckpt = torch.load(result_path / 'best_model.pth', map_location=device)
+    best_ckpt = torch.load(result_path / 'best_model.pth', map_location=device, weights_only=False)
     model.load_state_dict(best_ckpt['model_state'])
 
     val_loss, val_acc, val_preds, val_targets = run_epoch(
