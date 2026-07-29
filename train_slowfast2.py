@@ -509,12 +509,12 @@ def benchmark_latency(model, device, slow_frames, fast_frames, img_size, n_iters
     ]
     with torch.no_grad():
         for _ in range(5):  # warmup
-            model(dummy)
+            model([dummy[0], dummy[1]])
         if device.type == 'cuda':
             torch.cuda.synchronize()
         t0 = time.time()
         for _ in range(n_iters):
-            model(dummy)
+            model([dummy[0], dummy[1]])
         if device.type == 'cuda':
             torch.cuda.synchronize()
         t1 = time.time()
