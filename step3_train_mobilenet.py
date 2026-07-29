@@ -31,6 +31,23 @@ from torch.utils.data import Dataset, DataLoader
 import torchvision.transforms as transforms
 from torch.optim.lr_scheduler import MultiStepLR
 
+
+# Add at top of training script
+best_val    = 0.0
+patience    = 7   # stop if no improvement for 7 epochs
+no_improve  = 0
+
+# Add inside epoch loop after val_epoch:
+if vl_acc > best_val:
+    best_val   = vl_acc
+    no_improve = 0
+    # save best model
+else:
+    no_improve += 1
+    if no_improve >= patience:
+        print(f"Early stopping at epoch {epoch}")
+        break
+      
 parser = argparse.ArgumentParser()
 parser.add_argument('--jpg_root',    type=str,
                     default='G:/My Drive/FYP_DATA_jpg_raw')
@@ -112,7 +129,7 @@ class MobileNet3D(nn.Module):
             DepthwiseSeparable3D(ch(1024), ch(1024), stride=1),
         )
         self.pool       = nn.AdaptiveAvgPool3d(1)
-        self.dropout    = nn.Dropout(0.5)
+        self.dropout    = nn.Dropout(0.7)
         self.classifier = nn.Linear(ch(1024), n_classes)
 
         # weight init
@@ -321,8 +338,8 @@ if __name__ == '__main__':
     print(f"✅ MobileNet3D built  |  Parameters: {total_params/1e6:.2f}M")
 
     # weighted loss for class imbalance
-    # fight=1.61, Normal=0.53, unsafeClimb=1.53, unsafeJump=1.17, unsafeThrow=1.03
-    weights = torch.tensor([1.125, 0.506, 1.475, 0.991, 1.548, 1.252]).to(device)
+    # fight=1.61, fall=0.53, unsafeClimb=1.53, unsafeJump=1.17, unsafeThrow=1.03
+    weights = torch.tensor([0.913, 0.903, 0.953, 1.096, 1.196]).to(device)
     criterion = nn.CrossEntropyLoss(weight=weights)
 
     optimizer = torch.optim.SGD(
