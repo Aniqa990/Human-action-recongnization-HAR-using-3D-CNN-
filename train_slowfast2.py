@@ -499,8 +499,10 @@ def compute_flops_and_params(model, device, slow_frames, fast_frames, img_size):
         return None, None
 
 
+# --- CHANGE THIS FUNCTION IN train_slowfast2.py ---
 def benchmark_latency(model, device, slow_frames, fast_frames, img_size, n_iters=30):
     model.eval()
+    # Ensure inputs are explicitly shaped list [slow, fast]
     dummy = [
         torch.randn(1, 3, slow_frames, img_size, img_size, device=device),
         torch.randn(1, 3, fast_frames, img_size, img_size, device=device),
