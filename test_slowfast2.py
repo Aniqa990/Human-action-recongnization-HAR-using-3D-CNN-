@@ -63,7 +63,8 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 # output head was trained on. Hardcoding this list separately (as the old
 # script did) risks a silent class-index mismatch with no error -- always
 # derive it from the checkpoint instead.
-_ckpt = torch.load(checkpoint, map_location='cpu')
+_ckpt = torch.load(checkpoint, map_location='cpu', weights_only=False)
+_ckpt = torch.load(checkpoint, map_location='cpu', weights_only=False)
 if isinstance(_ckpt, dict) and 'args' in _ckpt and 'classes' in _ckpt.get('args', {}):
     CLASSES = _ckpt['args']['classes'].split(',')
     print(f"[info] Loaded class order from checkpoint: {CLASSES}")
