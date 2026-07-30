@@ -1,93 +1,112 @@
 """
-train_x3d_final.py
+train_x3d_1gpu.py
 ====================================================================
-X3D fine-tuning for 5-class child-safety action recognition
-(fight, unsafeClimb, unsafeJump, unsafeThrow, fall).
+X3D-S fine-tuning, SINGLE T4 GPU, for 5-class child-safety action
+recognition (fight, unsafeClimb, unsafeJump, unsafeThrow, fall).
 
-WHY THIS SCRIPT (vs. your step3_train_x3d_v5.py):
+MODEL CHOICE (per facebookresearch/pytorchvideo model_zoo.md,
+Kinetics-400, single-view inference):
 
-  * Model      : torch.hub 'facebookresearch/pytorchvideo' x3d_s,
-                 pretrained=True (Kinetics-400). This is the correct,
-                 equivalent alternative to the SlowFast repo's model-zoo
-                 checkpoints for a plain classification fine-tune — you
-                 do NOT need the full slowfast/detectron2 config stack
-                 to get the same pretrained weights.
+    X3D-XS : 4x12 frames  | top-1 69.12% | 0.91 GFLOPs | 3.79M params
+    X3D-S  : 13x6 frames  | top-1 73.33% | 2.96 GFLOPs | 3.79M params
+    X3D-M  : 16x5 frames  | top-1 75.94% | 6.72 GFLOPs | 3.79M params
 
-  * Data split : Read directly from dataset.json's 'training' /
-                 'validation' subsets. step2_prepare_annotation.py
-                 already grouped augmented variants by source video
-                 before splitting, so there is no leakage risk left to
-                 fix — re-doing GroupKFold on top (as v5 did) is
-                 redundant.
+    X3D-M has the best Kinetics accuracy, but is NOT the right choice
+    here: your prior run already showed clear overfitting (train acc
+    97.7% while val macro-F1 fell after epoch 12) on a dataset with a
+    limited number of *unique source* videos. X3D-M needs 224px input
+    and 16-frame clips (vs S's 160px/13-frame) — strictly more capacity
+    and receptive field to memorize clips with, on a single GPU with
+    a smaller batch. That is the wrong direction while overfitting is
+    the live problem. X3D-S is used here. Revisit X3D-M only if you
+    substantially grow the number of unique source videos per class
+    (--x3d_variant x3d_m is wired up and ready if/when that happens).
 
-  * Augmentation: LIGHT ONLY (random crop + horizontal flip). Your
-                 clips are already augmented offline (Brightness,
-                 GaussianNoise, RandomRotate, TemporalJitter,
-                 Grayscale). Stacking heavy ColorJitter/GaussianBlur/
-                 RandomErasing on top of that (as v5 did) compounds
-                 distortions rather than adding new signal.
+WHAT CHANGED FROM THE 2-GPU VERSION (and why):
+
+  * No nn.DataParallel — single GPU. Default batch_size lowered to 8
+    to fit comfortably on one T4 at 160x160x13.
+
+  * BatchNorm3d layers are FROZEN during fine-tuning (kept in eval()
+    mode; only their affine gamma/beta still receive gradients through
+    the running stats used at Kinetics-pretrain time, but running
+    mean/var are NOT updated). This directly targets the instability
+    you saw last run — per-class recall swinging wildly epoch to
+    epoch is a classic symptom of noisy BatchNorm statistics computed
+    from small per-step batches once BN is unfrozen. Freezing BN to
+    the Kinetics running stats removes that noise source entirely.
+
+  * --phase1_epochs default lowered from 5 to 1. Your last run showed
+    5 frozen epochs actively teaching the head a degenerate shortcut
+    (predict `fall`, ignore `fight`) because a linear head alone can't
+    manufacture new class separability out of generic frozen features.
+    One epoch of head-only warm-up is enough to avoid first-step noise
+    from the freshly-initialized head corrupting the backbone; more
+    than that was actively hurting you.
+
+  * --full_lr lowered (1e-4 -> 5e-5) and --weight_decay raised
+    (1e-4 -> 5e-4) by default for phase 2, both slowing down how fast
+    the (now-unfrozen, BN-frozen) backbone can memorize training clips.
 
   * Class imbalance: Class-Balanced Loss (Cui et al., CVPR 2019,
-                 "Class-Balanced Loss Based on Effective Number of
-                 Samples") + Focal Loss (Lin et al., ICCV 2017).
-                 Class-Balanced weighting is more correct than naive
-                 inverse-frequency because it accounts for redundancy
-                 among near-duplicate augmented clips. Focal loss
-                 additionally down-weights EASY EXAMPLES automatically,
-                 which is the principled fix for "don't let the model
-                 coast on the class it already nails" (e.g. `fall`,
-                 which pretrained backbones often already handle well)
-                 — it responds to per-sample difficulty, not a label
-                 you'd have to guess ahead of time. On top of that,
-                 --fall_weight_multiplier lets you manually dial a
-                 class's weight down further once you've SEEN the
-                 confusion matrix from a first run.
+    "Class-Balanced Loss Based on Effective Number of Samples") +
+    Focal Loss (Lin et al., ICCV 2017). Class-Balanced weighting uses
+    effective sample count (accounts for redundancy among near-
+    duplicate augmented clips) rather than raw inverse frequency.
+    Focal loss additionally down-weights EASY EXAMPLES automatically —
+    this is the principled fix for "don't let the model focus on the
+    class it already nails" (commonly `fall`, since pretrained action
+    backbones tend to find falling/collapsing motion easy): it responds
+    to per-example confidence, not a label you'd have to guess ahead
+    of time. --fall_weight_multiplier lets you manually turn `fall`'s
+    weight down further once you've SEEN a confusion matrix confirming
+    it's the easy class in YOUR data specifically.
 
-  * Freeze/unfreeze: single training loop, not two separate optimizer
-                 phases. Backbone parameters get requires_grad=False
-                 for the first --phase1_epochs, then True after — the
-                 SAME optimizer/scheduler run the whole time (with two
-                 param groups: backbone @ full_lr, head @ head_lr).
-                 This makes checkpoint/resume trivial: just restore
-                 epoch, optimizer, scheduler, scaler state and keep
-                 going. No "which phase was I in" bookkeeping.
+  * Dataset augmentation: your clips are already augmented offline
+    (Brightness/GaussianNoise/RandomRotate/TemporalJitter/Grayscale/
+    HorizontalFlip variants exist as separate video files). Only LIGHT
+    additional augmentation (random crop + flip) is applied here to
+    avoid compounding distortions on top of what's already baked in.
+
+  * Data split: read directly from dataset.json's 'training' /
+    'validation' subsets, which step2_prepare_annotation.py already
+    built by grouping augmented variants under their source video
+    before splitting — so there's no leakage to re-fix with k-fold.
 
   * Checkpointing: last_checkpoint.pth saved EVERY epoch (full resume
-                 state incl. RNG). best_model.pth saved whenever val
-                 macro-F1 improves (monitoring macro-F1, not accuracy,
-                 is what you want with class imbalance).
+    state incl. RNG, optimizer, scheduler, scaler). best_model.pth
+    saved whenever val macro-F1 improves (macro-F1, not accuracy, is
+    the right thing to monitor under class imbalance).
 
   * Early stopping: patience on val macro-F1, reset when phase 2
-                 begins (unfreezing changes the loss landscape, so an
-                 old plateau shouldn't count against the new phase).
+    (unfreezing) begins, since that's a genuine regime change.
 
-  * Metrics for your paper: per-epoch train/val loss+acc, best-epoch
-                 per-class precision/recall/F1, confusion matrix,
-                 macro/weighted F1, parameter count, and FLOPs via
-                 fvcore (the same library the SlowFast repo itself
-                 uses for FLOP counting, so your number is directly
-                 comparable to published X3D FLOP figures).
+  * Metrics for your paper: per-epoch train/val loss+acc+F1, best-
+    epoch per-class precision/recall/F1, confusion matrix, macro/
+    weighted F1, parameter count, and FLOPs via fvcore (the same tool
+    the SlowFast repo itself uses for FLOP counting, so your number is
+    directly comparable to the published X3D FLOP figures above).
 
-USAGE (Kaggle, 2x T4):
+USAGE (Kaggle, single T4):
     !pip install -q torch torchvision pytorchvideo fvcore scikit-learn
 
-    !python train_x3d_final.py \
+    !python train_x3d_1gpu.py \
         --jpg_root    /kaggle/working/FYP_DATA_jpg_raw \
         --annotation  /kaggle/working/FYP_DATA_jpg_raw/dataset.json \
-        --result_path /kaggle/working/results_x3d_final \
-        --n_epochs 40 --phase1_epochs 5 --batch_size 16 --n_workers 4
+        --result_path /kaggle/working/results_x3d_1gpu \
+        --n_epochs 40 --phase1_epochs 1 --batch_size 8 --n_workers 2
 
 RESUME after an interrupted run:
-    !python train_x3d_final.py \
-        --jpg_root ... --annotation ... --result_path /kaggle/working/results_x3d_final \
-        --resume /kaggle/working/results_x3d_final/last_checkpoint.pth
+    !python train_x3d_1gpu.py \
+        --jpg_root ... --annotation ... \
+        --result_path /kaggle/working/results_x3d_1gpu \
+        --resume /kaggle/working/results_x3d_1gpu/last_checkpoint.pth
 ====================================================================
 """
 
 import os, json, time, random, argparse
 import numpy as np
 from collections import Counter
-from pathlib import Path
 from PIL import Image
 
 import torch
@@ -95,10 +114,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.cuda.amp import autocast, GradScaler
+from torch.amp import autocast, GradScaler
 import torchvision.transforms as T
-from sklearn.metrics import (precision_recall_fscore_support,
-                              confusion_matrix, accuracy_score)
+from sklearn.metrics import precision_recall_fscore_support, confusion_matrix, accuracy_score
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CLI
@@ -110,34 +128,42 @@ parser.add_argument('--result_path',  type=str, required=True)
 
 parser.add_argument('--classes', type=str, nargs='+',
                     default=['fight', 'unsafeClimb', 'unsafeJump', 'unsafeThrow', 'fall'],
-                    help='Class list — must match what is in dataset.json labels. '
-                         'Default matches your existing step2/step4 pipeline (no Normal).')
+                    help='Must match labels present in dataset.json. Default matches your '
+                         'existing step2/step4 pipeline (Normal excluded).')
 
 parser.add_argument('--n_epochs',        type=int,   default=40)
-parser.add_argument('--phase1_epochs',   type=int,   default=5,
-                    help='Epochs with backbone frozen (head-only) before unfreezing everything.')
-parser.add_argument('--batch_size',      type=int,   default=16)
+parser.add_argument('--phase1_epochs',   type=int,   default=1,
+                    help='Head-only warm-up epochs before unfreezing the backbone. '
+                         'Kept short deliberately — see docstring.')
+parser.add_argument('--batch_size',      type=int,   default=8,
+                    help='Lowered for single-GPU T4 memory. Raise if you have headroom.')
 parser.add_argument('--head_lr',         type=float, default=1e-3)
-parser.add_argument('--full_lr',         type=float, default=1e-4)
-parser.add_argument('--weight_decay',    type=float, default=1e-4)
+parser.add_argument('--full_lr',         type=float, default=5e-5,
+                    help='Lowered from 1e-4 to slow memorization once backbone unfreezes.')
+parser.add_argument('--weight_decay',    type=float, default=5e-4,
+                    help='Raised from 1e-4 for stronger regularization given overfitting risk.')
 parser.add_argument('--label_smoothing', type=float, default=0.1)
 parser.add_argument('--n_frames',        type=int,   default=13,
-                    help='13 = official X3D-S clip length. Use 16 for x3d_m/xs consistency with your prior scripts.')
-parser.add_argument('--img_size',        type=int,   default=160)
+                    help='13 = official X3D-S clip length.')
+parser.add_argument('--img_size',        type=int,   default=160,
+                    help='160 = official X3D-S input size.')
 parser.add_argument('--x3d_variant',     type=str,   default='x3d_s',
                     choices=['x3d_xs', 'x3d_s', 'x3d_m'])
-parser.add_argument('--n_workers',       type=int,   default=4)
+parser.add_argument('--n_workers',       type=int,   default=2)
 parser.add_argument('--seed',            type=int,   default=42)
 
+parser.add_argument('--freeze_bn', dest='freeze_bn', action='store_true', default=True,
+                    help='Keep BatchNorm3d layers in eval mode throughout training '
+                         '(default: on — recommended for small-batch single-GPU fine-tuning).')
+parser.add_argument('--no_freeze_bn', dest='freeze_bn', action='store_false')
+
 parser.add_argument('--focal_gamma', type=float, default=1.5,
-                    help='Focal-loss focusing parameter. 0 = plain (class-balanced) cross-entropy.')
+                    help='Focal-loss focusing parameter. 0 = plain class-balanced cross-entropy.')
 parser.add_argument('--cb_beta', type=float, default=0.999,
-                    help='Class-Balanced Loss beta (Cui et al. 2019). Closer to 1 = stronger reweighting.')
+                    help='Class-Balanced Loss beta (Cui et al. 2019).')
 parser.add_argument('--fall_weight_multiplier', type=float, default=1.0,
-                    help="Extra multiplier applied to the 'fall' class weight AFTER class-balanced "
-                         "weighting. Set e.g. 0.5 to deliberately reduce its share of the loss once "
-                         "you've confirmed from a first run's confusion matrix that it is already "
-                         "well-handled by the pretrained backbone.")
+                    help="Extra multiplier on the 'fall' class weight AFTER class-balanced "
+                         "weighting. Set e.g. 0.5 once a confusion matrix confirms it's easy.")
 
 parser.add_argument('--patience', type=int, default=8,
                     help='Early-stopping patience in epochs, monitored on val macro-F1.')
@@ -151,9 +177,8 @@ C2I       = {c: i for i, c in enumerate(CLASSES)}
 N_CLASSES = len(CLASSES)
 
 os.makedirs(args.result_path, exist_ok=True)
-device      = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-n_gpus      = torch.cuda.device_count()
-use_amp     = (not args.no_amp) and torch.cuda.is_available()
+device  = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+use_amp = (not args.no_amp) and torch.cuda.is_available()
 
 random.seed(args.seed)
 np.random.seed(args.seed)
@@ -162,13 +187,15 @@ if torch.cuda.is_available():
     torch.cuda.manual_seed_all(args.seed)
 
 print(f"\n{'='*70}")
-print(f"  X3D FINE-TUNING  —  {N_CLASSES}-class child-safety action recognition")
+print(f"  X3D FINE-TUNING (single GPU)  —  {N_CLASSES}-class child-safety action recognition")
 print(f"{'='*70}")
-print(f"  Device        : {device}  |  GPUs available: {n_gpus}")
+print(f"  Device        : {device}")
 print(f"  X3D variant   : {args.x3d_variant}")
 print(f"  Classes       : {CLASSES}")
 print(f"  Epochs        : {args.n_epochs}  (backbone frozen for first {args.phase1_epochs})")
+print(f"  BN frozen     : {args.freeze_bn}")
 print(f"  LR head/full  : {args.head_lr} / {args.full_lr}")
+print(f"  Weight decay  : {args.weight_decay}")
 print(f"  Frames/clip   : {args.n_frames}  |  Image size: {args.img_size}x{args.img_size}")
 print(f"  Loss          : Class-Balanced (beta={args.cb_beta}) + Focal (gamma={args.focal_gamma})")
 print(f"  Mixed prec.   : {use_amp}")
@@ -179,7 +206,6 @@ print(f"{'='*70}\n")
 # Frame sampling
 # ─────────────────────────────────────────────────────────────────────────────
 def sample_frames_train(files, n):
-    """Random contiguous window (loop if clip shorter than n)."""
     total = len(files)
     if total == 0:
         return []
@@ -193,7 +219,6 @@ def sample_frames_train(files, n):
 
 
 def sample_frames_val(files, n):
-    """Deterministic centre window — reproducible every run."""
     total = len(files)
     if total == 0:
         return []
@@ -207,7 +232,7 @@ def sample_frames_val(files, n):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Transforms — LIGHT ONLY, since offline augmentation already exists
+# Transforms — LIGHT ONLY (offline augmentation already exists)
 # ─────────────────────────────────────────────────────────────────────────────
 def make_train_transform(img_size):
     return T.Compose([
@@ -294,18 +319,10 @@ def build_x3d(variant):
 
 
 def get_param_groups(model):
-    """Separate head (classifier) params from backbone params."""
     head_params, backbone_params = [], []
-    for name, p in model.named_parameters():
-        if 'blocks.5.proj' in name or name.startswith('blocks.5.proj'):
-            head_params.append(p)
-        else:
-            backbone_params.append(p)
-    # Fallback in case naming differs across pytorchvideo versions:
-    if len(head_params) == 0:
-        head_params    = list(model.blocks[-1].proj.parameters())
-        head_ids       = {id(p) for p in head_params}
-        backbone_params = [p for p in model.parameters() if id(p) not in head_ids]
+    head_ids = {id(p) for p in model.blocks[-1].proj.parameters()}
+    for p in model.parameters():
+        (head_params if id(p) in head_ids else backbone_params).append(p)
     return backbone_params, head_params
 
 
@@ -313,6 +330,16 @@ def set_backbone_trainable(model, trainable):
     backbone_params, _ = get_param_groups(model)
     for p in backbone_params:
         p.requires_grad = trainable
+
+
+def freeze_bn(model):
+    """Put every BatchNorm3d in eval mode so running stats stop updating,
+    regardless of model.train()/eval() calls elsewhere. Call this AFTER
+    model.train() each epoch, since .train() would otherwise re-enable
+    BN's running-stat updates."""
+    for m in model.modules():
+        if isinstance(m, (nn.BatchNorm3d, nn.BatchNorm2d, nn.BatchNorm1d)):
+            m.eval()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -329,7 +356,7 @@ def compute_class_balanced_weights(train_labels, beta):
         w = (1.0 - beta) / effective_num
         weights.append(w)
     w = torch.tensor(weights, dtype=torch.float32)
-    w = w / w.mean()  # normalise: mean weight = 1.0, keeps loss scale stable
+    w = w / w.mean()
 
     fall_idx = C2I.get('fall', None)
     if fall_idx is not None and args.fall_weight_multiplier != 1.0:
@@ -341,13 +368,6 @@ def compute_class_balanced_weights(train_labels, beta):
 
 
 class FocalLoss(nn.Module):
-    """
-    Cross-entropy scaled by (1 - p_t)^gamma, so well-classified (easy)
-    examples contribute less to the loss regardless of their class —
-    this is what actually prevents the model from "coasting" on a class
-    the pretrained backbone already finds easy (e.g. fall), because it
-    responds to per-example confidence rather than a class label.
-    """
     def __init__(self, weight=None, gamma=1.5, label_smoothing=0.0):
         super().__init__()
         self.weight = weight
@@ -357,7 +377,7 @@ class FocalLoss(nn.Module):
     def forward(self, logits, targets):
         ce = F.cross_entropy(logits, targets, weight=self.weight,
                              label_smoothing=self.label_smoothing, reduction='none')
-        pt = torch.exp(-ce.detach() if self.gamma == 0 else -ce)
+        pt = torch.exp(-ce)
         focal_term = (1 - pt) ** self.gamma if self.gamma > 0 else 1.0
         return (focal_term * ce).mean()
 
@@ -368,7 +388,7 @@ class FocalLoss(nn.Module):
 def compute_flops_and_params(model):
     result = {'params_M': sum(p.numel() for p in model.parameters()) / 1e6}
     try:
-        from fvcore.nn import FlopCountAnalysis, parameter_count
+        from fvcore.nn import FlopCountAnalysis
         dummy = torch.randn(1, 3, args.n_frames, args.img_size, args.img_size).to(device)
         model.eval()
         with torch.no_grad():
@@ -377,8 +397,7 @@ def compute_flops_and_params(model):
             result['GFLOPs'] = flops.total() / 1e9
         model.train()
     except Exception as e:
-        print(f"  [WARN] fvcore FLOP count failed ({e}). "
-              f"Install with `pip install fvcore` for this figure.")
+        print(f"  [WARN] fvcore FLOP count failed ({e}). Install with `pip install fvcore`.")
         result['GFLOPs'] = None
     return result
 
@@ -387,7 +406,12 @@ def compute_flops_and_params(model):
 # One epoch
 # ─────────────────────────────────────────────────────────────────────────────
 def run_epoch(model, loader, optimizer, criterion, scaler, is_train):
-    model.train() if is_train else model.eval()
+    if is_train:
+        model.train()
+        if args.freeze_bn:
+            freeze_bn(model)
+    else:
+        model.eval()
 
     total_loss, all_preds, all_labels = 0.0, [], []
     ctx = torch.enable_grad() if is_train else torch.no_grad()
@@ -401,7 +425,7 @@ def run_epoch(model, loader, optimizer, criterion, scaler, is_train):
                 optimizer.zero_grad(set_to_none=True)
 
             if use_amp:
-                with autocast():
+                with autocast('cuda'):
                     out  = model(clips)
                     loss = criterion(out, labels)
             else:
@@ -421,8 +445,7 @@ def run_epoch(model, loader, optimizer, criterion, scaler, is_train):
                     optimizer.step()
 
             total_loss += loss.item()
-            preds = out.argmax(dim=1).detach().cpu().tolist()
-            all_preds.extend(preds)
+            all_preds.extend(out.argmax(dim=1).detach().cpu().tolist())
             all_labels.extend(labels.cpu().tolist())
 
     avg_loss = total_loss / max(1, len(loader))
@@ -432,16 +455,13 @@ def run_epoch(model, loader, optimizer, criterion, scaler, is_train):
     macro_f1    = f1.mean()
     weighted_f1 = np.average(f1, weights=support) if support.sum() > 0 else 0.0
 
-    metrics = {
+    return {
         'loss': avg_loss, 'acc': acc, 'macro_f1': macro_f1, 'weighted_f1': weighted_f1,
-        'per_class': {CLASSES[i]: {'precision': float(precision[i]),
-                                   'recall': float(recall[i]),
-                                   'f1': float(f1[i]),
-                                   'support': int(support[i])}
+        'per_class': {CLASSES[i]: {'precision': float(precision[i]), 'recall': float(recall[i]),
+                                   'f1': float(f1[i]), 'support': int(support[i])}
                       for i in range(N_CLASSES)},
         'all_preds': all_preds, 'all_labels': all_labels,
     }
-    return metrics
 
 
 def print_per_class(per_class):
@@ -453,15 +473,11 @@ def print_per_class(per_class):
 # ─────────────────────────────────────────────────────────────────────────────
 # Checkpointing
 # ─────────────────────────────────────────────────────────────────────────────
-def raw_state_dict(model):
-    return model.module.state_dict() if isinstance(model, nn.DataParallel) else model.state_dict()
-
-
 def save_checkpoint(path, model, optimizer, scheduler, scaler, epoch, best_macro_f1,
                     epochs_no_improve, extra=None):
     ckpt = {
         'epoch': epoch,
-        'state_dict': raw_state_dict(model),
+        'state_dict': model.state_dict(),
         'optimizer': optimizer.state_dict(),
         'scheduler': scheduler.state_dict(),
         'scaler': scaler.state_dict() if scaler is not None else None,
@@ -513,7 +529,6 @@ def main():
     print(f"\nBuilding {args.x3d_variant}...")
     model = build_x3d(args.x3d_variant).to(device)
 
-    # FLOPs / params BEFORE wrapping in DataParallel
     flop_info = compute_flops_and_params(model)
     print(f"  Params : {flop_info['params_M']:.2f} M")
     if flop_info['GFLOPs'] is not None:
@@ -535,22 +550,16 @@ def main():
     ], weight_decay=args.weight_decay)
 
     scheduler = CosineAnnealingLR(optimizer, T_max=args.n_epochs, eta_min=1e-6)
-    scaler = GradScaler(enabled=use_amp)
-
-    if n_gpus > 1:
-        print(f"  Using nn.DataParallel across {n_gpus} GPUs")
-        model = nn.DataParallel(model)
+    scaler = GradScaler('cuda', enabled=use_amp)
 
     start_epoch       = 1
     best_macro_f1      = 0.0
     epochs_no_improve  = 0
 
-    # ── Resume ────────────────────────────────────────────────────────────────
     if args.resume and os.path.exists(args.resume):
         print(f"\nResuming from: {args.resume}")
-        ckpt = torch.load(args.resume, map_location=device)
-        raw_state_dict(model).update(ckpt['state_dict'])  # no-op safety
-        (model.module if isinstance(model, nn.DataParallel) else model).load_state_dict(ckpt['state_dict'])
+        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt['state_dict'])
         optimizer.load_state_dict(ckpt['optimizer'])
         scheduler.load_state_dict(ckpt['scheduler'])
         if use_amp and ckpt.get('scaler'):
@@ -567,7 +576,6 @@ def main():
                 torch.cuda.set_rng_state_all(rng['cuda'])
         print(f"  Resumed at epoch {start_epoch}  (best macro-F1 so far: {best_macro_f1*100:.2f}%)")
 
-    log_rows = []
     log_path = os.path.join(args.result_path, 'log.csv')
     if not os.path.exists(log_path) or start_epoch == 1:
         with open(log_path, 'w') as f:
@@ -577,15 +585,14 @@ def main():
     for epoch in range(start_epoch, args.n_epochs + 1):
         phase = 'phase1_frozen' if epoch <= args.phase1_epochs else 'phase2_full'
 
-        # Entering phase 2 for the first time: unfreeze + reset early-stop patience
         if epoch == args.phase1_epochs + 1:
             print(f"\n  ── Unfreezing backbone (phase 2 begins) ──")
-            set_backbone_trainable(model.module if isinstance(model, nn.DataParallel) else model, True)
+            set_backbone_trainable(model, True)
             epochs_no_improve = 0
         elif epoch == start_epoch and phase == 'phase1_frozen':
-            set_backbone_trainable(model.module if isinstance(model, nn.DataParallel) else model, False)
+            set_backbone_trainable(model, False)
         elif epoch == start_epoch and phase == 'phase2_full':
-            set_backbone_trainable(model.module if isinstance(model, nn.DataParallel) else model, True)
+            set_backbone_trainable(model, True)
 
         t0 = time.time()
         tr = run_epoch(model, train_loader, optimizer, criterion, scaler, is_train=True)
@@ -599,11 +606,10 @@ def main():
               f"LR {lr_bb:.2e}  {time.time()-t0:.0f}s")
         print_per_class(vl['per_class'])
 
-        log_rows.append((epoch, phase, tr['loss'], tr['acc'], tr['macro_f1'],
-                         vl['loss'], vl['acc'], vl['macro_f1'], vl['weighted_f1'], lr_bb))
         with open(log_path, 'a') as f:
-            f.write(",".join(str(round(x, 6) if isinstance(x, float) else x)
-                             for x in log_rows[-1]) + "\n")
+            row = (epoch, phase, tr['loss'], tr['acc'], tr['macro_f1'],
+                  vl['loss'], vl['acc'], vl['macro_f1'], vl['weighted_f1'], lr_bb)
+            f.write(",".join(str(round(x, 6) if isinstance(x, float) else x) for x in row) + "\n")
 
         improved = vl['macro_f1'] > best_macro_f1
         if improved:
@@ -623,7 +629,6 @@ def main():
         else:
             epochs_no_improve += 1
 
-        # Always save resumable "last" checkpoint
         save_checkpoint(os.path.join(args.result_path, 'last_checkpoint.pth'),
                         model, optimizer, scheduler, scaler, epoch, best_macro_f1, epochs_no_improve)
 
@@ -632,22 +637,15 @@ def main():
                   f"{args.patience} epochs (best {best_macro_f1*100:.2f}%).")
             break
 
-    # ── Final paper-ready summary from the BEST checkpoint ─────────────────────
     best_path = os.path.join(args.result_path, 'best_model.pth')
     if os.path.exists(best_path):
-        best_ckpt = torch.load(best_path, map_location='cpu')
+        best_ckpt = torch.load(best_path, map_location='cpu', weights_only=False)
         summary = {
-            'model': args.x3d_variant,
-            'n_classes': N_CLASSES,
-            'classes': CLASSES,
-            'params_M': best_ckpt.get('params_M'),
-            'GFLOPs': best_ckpt.get('GFLOPs'),
-            'best_epoch': best_ckpt['epoch'],
-            'val_accuracy': best_ckpt['val_acc'],
-            'val_macro_f1': best_ckpt['val_macro_f1'],
-            'val_weighted_f1': best_ckpt['val_weighted_f1'],
-            'per_class': best_ckpt['per_class'],
-            'confusion_matrix': best_ckpt['confusion_matrix'],
+            'model': args.x3d_variant, 'n_classes': N_CLASSES, 'classes': CLASSES,
+            'params_M': best_ckpt.get('params_M'), 'GFLOPs': best_ckpt.get('GFLOPs'),
+            'best_epoch': best_ckpt['epoch'], 'val_accuracy': best_ckpt['val_acc'],
+            'val_macro_f1': best_ckpt['val_macro_f1'], 'val_weighted_f1': best_ckpt['val_weighted_f1'],
+            'per_class': best_ckpt['per_class'], 'confusion_matrix': best_ckpt['confusion_matrix'],
             'train_val_split': {'train_n': len(train_samples), 'val_n': len(val_samples)},
         }
         with open(os.path.join(args.result_path, 'final_summary.json'), 'w') as f:
